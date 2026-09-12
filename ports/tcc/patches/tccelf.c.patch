@@ -1,0 +1,11 @@
+--- a/tccelf.c
++++ b/tccelf.c
+@@ -2705,6 +2705,8 @@
+     ehdr.e_ident[EI_OSABI] = ELFOSABI_OPENBSD;
+ #elif TARGETOS_NetBSD
+     ehdr.e_ident[EI_OSABI] = ELFOSABI_NETBSD;
++#elif TARGETOS_sic
++    ehdr.e_ident[EI_OSABI] = 0x53; /* ELFOSABI_SIC: the sic kernel refuses anything else */
+ #elif defined TCC_TARGET_ARM && defined TCC_ARM_EABI
+     ehdr.e_flags = EF_ARM_EABI_VER5;
+     ehdr.e_flags |= s1->float_abi == ARM_HARD_FLOAT

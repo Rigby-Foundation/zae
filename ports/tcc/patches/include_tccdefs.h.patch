@@ -1,0 +1,38 @@
+--- a/include/tccdefs.h
++++ b/include/tccdefs.h
+@@ -38,7 +38,7 @@
+     #define __SIZE_TYPE__ unsigned long
+     #define __PTRDIFF_TYPE__ long
+     #define __LP64__ 1
+-# if defined __linux__
++# if defined __linux__ || defined __sic__
+     #define __INT64_TYPE__ long
+ # else /* APPLE, BSD */
+     #define __INT64_TYPE__ long long
+@@ -60,7 +60,7 @@
+ #if defined _WIN32
+     #define __WCHAR_TYPE__ unsigned short
+     #define __WINT_TYPE__ unsigned short
+-#elif defined __linux__
++#elif defined __linux__ || defined __sic__
+     #define __WCHAR_TYPE__ int
+     #define __WINT_TYPE__ unsigned int
+ #else
+@@ -163,7 +163,7 @@
+ 
+     #define __builtin_offsetof(type, field) ((__SIZE_TYPE__)&((type*)0)->field)
+     #define __builtin_extract_return_addr(x) x
+-#if !defined __linux__ && !defined _WIN32
++#if !defined __linux__ && !defined __sic__ && !defined _WIN32
+     /* used by math.h */
+     #define __builtin_huge_val() 1e500
+     #define __builtin_huge_valf() 1e50f
+@@ -298,7 +298,7 @@
+     __BOUND(void*,__aeabi_memset,(void*,int,__SIZE_TYPE__))
+ #endif
+ 
+-#if defined __linux__ || defined __APPLE__ // HAVE MALLOC_REDIR
++#if defined __linux__ || defined __sic__ || defined __APPLE__ // HAVE MALLOC_REDIR
+     #define __MAYBE_REDIR __BUILTIN
+ #else
+     #define __MAYBE_REDIR __BOTH

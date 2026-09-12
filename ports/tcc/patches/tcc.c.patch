@@ -1,0 +1,11 @@
+--- a/tcc.c
++++ b/tcc.c
+@@ -203,6 +203,8 @@
+         " OpenBSD"
+ #elif TARGETOS_NetBSD
+         " NetBSD"
++#elif TARGETOS_sic
++        " sic"
+ #else
+         " Linux"
+ #endif

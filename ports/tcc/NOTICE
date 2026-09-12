@@ -1,0 +1,9 @@
+This directory is the sic port of the Tiny C Compiler.
+
+  src/           upstream tinycc ("mob"), (c) Fabrice Bellard et al.,
+                 LGPL-2.1-or-later (see src/COPYING). Fetched, not vendored.
+  patches/, Makefile, README   the port itself:
+                 Copyright (C) 2026 Rigby Foundation, GPL-2.0-only (see ../../LICENSE).
+
+The runtime pieces installed into the image (libtcc1.a, tcc's headers) keep
+tcc's own licence; programs compiled with tcc on sic are not affected by it.
