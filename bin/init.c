@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 int main(void)
 {
@@ -22,20 +23,34 @@ int main(void)
     setenv("PATH", "/bin", 1);
     setenv("HOME", "/", 1);
 
-    /* Persistent storage: mount the zaefs disk on /disk, formatting it first if needed. */
-    struct stat st;
-    if (stat("/dev/nvme0n1", &st) == 0) {
-        if (mount("/dev/nvme0n1", "/disk", "zaefs", 0, NULL) != 0 && errno != EBUSY) {
-            printf("init: /dev/nvme0n1 has no zaefs, formatting\n");
-            pid_t pid = fork();
-            if (pid == 0) {
-                execl("/bin/mkfs.zaefs", "mkfs.zaefs", "-L", "sicdisk", "/dev/nvme0n1", (char *)NULL);
-                _exit(127);
+    /* Persistent storage: mount the first zaefs volume found on /disk (an
+     * installed system's root partition, or a whole disk used as scratch). */
+    {
+        DIR *d = opendir("/dev");
+        struct dirent *e;
+        int mounted = 0;
+        while (d && !mounted && (e = readdir(d))) {
+            char path[64];
+            struct stat st;
+            snprintf(path, sizeof(path), "/dev/%s", e->d_name);
+            if (strcmp(e->d_name, "initrd") == 0 || stat(path, &st) != 0 || !S_ISBLK(st.st_mode)) continue;
+            if (mount(path, "/disk", "zaefs", 0, NULL) == 0) {
+                printf("init: mounted %s on /disk\n", path);
+                mounted = 1;
             }
-            int st2;
-            waitpid(pid, &st2, 0);
-            if (mount("/dev/nvme0n1", "/disk", "zaefs", 0, NULL) != 0)
-                printf("init: mount /disk failed: %s\n", strerror(errno));
+        }
+        if (d) closedir(d);
+        if (!mounted)
+            printf("init: no zaefs volume found; nothing mounted on /disk\n");
+    }
+
+    /* Networking: lease an address on the first Ethernet interface, in the
+     * background so a cable-less machine doesn't hold the shell up. */
+    if (access("/bin/dhcp", X_OK) == 0) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/bin/dhcp", "dhcp", "-t", "20", (char *)NULL);
+            _exit(1);
         }
     }
 
@@ -52,7 +67,10 @@ int main(void)
             continue;
         }
         int status;
-        waitpid(pid, &status, 0);
+        for (;;) {                  /* reap background helpers (dhcp) too */
+            pid_t w = waitpid(-1, &status, 0);
+            if (w == pid || (w < 0 && errno != EINTR)) break;
+        }
         if (WIFEXITED(status))
             printf("init: shell exited (%d), restarting\n", WEXITSTATUS(status));
         else

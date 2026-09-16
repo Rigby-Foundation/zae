@@ -72,15 +72,19 @@ $(BUILD)/bin/%: $(BUILD)/bin/%.o $(LIBC)/lib/libc.a
 
 $(BUILD)/%.o: %.c $(LIBC)/lib/libc.a
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(patsubst %,$(BUILD)/bin/%.d,$(PROGS))
 
 # Layout: /bin/<prog> plus everything under rootfs/ (etc/motd, ...); /dev and
 # /tmp exist so the kernel can populate them.
-$(INITRD): $(ELFS) $(ROOTFS) ports $(wildcard $(SYSROOT)/lib/modules/*.ko)
+$(INITRD): $(ELFS) $(ROOTFS) ports $(wildcard $(SYSROOT)/lib/modules/*.ko) $(SYSROOT)/boot/sic.elf $(wildcard $(SYSROOT)/boot/zaeboot/*)
 	@rm -rf $(BUILD)/root && mkdir -p $(BUILD)/root/bin $(BUILD)/root/dev $(BUILD)/root/tmp
 	@cp -R rootfs/. $(BUILD)/root/
 	@cp $(ELFS) $(BUILD)/root/bin/
 	@for p in $(PORTS); do cp -R ports/$$p/build/root/. $(BUILD)/root/; done
+	@mkdir -p $(BUILD)/root/boot && cp $(SYSROOT)/boot/sic.elf $(BUILD)/root/boot/ && \
+	    { [ -d $(SYSROOT)/boot/zaeboot ] && cp -R $(SYSROOT)/boot/zaeboot $(BUILD)/root/boot/ || echo "note: no $(SYSROOT)/boot/zaeboot (run 'zig build sysroot' in zaeboot); sicinstall won't work"; }
 	@mkdir -p $(BUILD)/root/lib/modules && cp $(SYSROOT)/lib/modules/*.ko $(BUILD)/root/lib/modules/ 2>/dev/null || true
 	tar --format ustar -cf $@ -C $(BUILD)/root .
 
