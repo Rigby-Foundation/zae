@@ -12,17 +12,35 @@ bin/      one C file per program -> /bin/<name>
 rootfs/   copied verbatim into the image (/etc/motd, /usr/src/hello.c, ...)
 ports/    third-party software, one directory per package with its own Makefile,
           patches/ and fetch rule; each installs into ports/<name>/build/root,
-          overlaid onto the image. Currently: tcc (the Tiny C Compiler).
+          overlaid onto the image. Currently: tcc (the Tiny C Compiler) and
+          doom (doomgeneric with Freedoom Phase 1 as the game data - id's
+          shareware WAD isn't redistributable; `make DOOM_WAD=none` leaves
+          the data out and `doom -iwad /disk/doom.wad` uses your own).
+          Video is `/dev/fb0`, input is `/dev/console` in raw scancode mode.
 ```
 
-Programs: `init` (prints `/etc/motd`, sets PATH, mounts the zaefs disk on `/disk` —
-formatting it with `mkfs.zaefs` on first boot — and respawns the shell), `sh`
-(builtins `cd pwd exit export help`, runs commands via `execvp`, `&` for
-background jobs), `ls`, `cat`, `echo` (`echo words > file`), `hello`, `uname`,
-`env`, `crash` (deliberately faults), `mkfs.zaefs`/`mount`/`umount` (persistent
-storage), `insmod`/`rmmod`/`lsmod` (kernel modules, shipped in `/lib/modules` from the
-kernel build), `test` (libc/fork/exec/wait/filesystem/mmap/modules/tcc self test, run by
+Programs: `init` (prints `/etc/motd`, sets PATH, mounts the first zaefs volume it
+finds on `/disk` — the root partition on an installed system, or a freshly
+formatted NVMe scratch disk in QEMU — and respawns the shell), `sh`
+(builtins `cd pwd exit export help`; pipelines with `|`, redirections `< > >>`,
+`&` for background jobs, `^C` interrupts the foreground job), `grep`, `wc`,
+`sleep`, `kill`, `yes`, `threads` (pthreads smoke test), `ls`, `cat`, `echo` (`echo words > file`), `hello`, `uname`,
+`env`, `crash` (deliberately faults), `mkfs.zaefs`/`mkfs.fat`/`mount`/`umount`
+(persistent storage; `mount -t fat`), `sicinstall` (installs the running system
+onto a disk: GPT with an ESP for UEFI, a raw boot partition for BIOS and a zaefs
+root — one disk boots on both firmwares), `insmod`/`rmmod`/`lsmod` (kernel modules, shipped in `/lib/modules` from the
+kernel build), `test` (libc/fork/exec/wait/pipes/signals/threads/filesystem/zaefs/FAT/mmap/modules/tcc/sockets self test, run by
 the kernel at boot if present).
+
+Networking: `net` (show interfaces; `net eth0 ADDR MASK [GATEWAY]`, `net dns
+SERVER`), `dhcp` (one-shot DHCP client; init runs it on `eth0` at boot and it
+writes `/etc/resolv.conf`), `ping`, `nc` (`nc HOST PORT`, `nc -l PORT`, `-u`
+for UDP), `fetch` (HTTP GET: `fetch -o file http://host/path`), `httpd`
+(`httpd -p 80 /some/dir &`, a static file server). Name resolution is musl's
+own resolver over UDP, so any program using `getaddrinfo` works. In QEMU use
+`-netdev user,id=n0,hostfwd=tcp::8080-:80 -device e1000,netdev=n0`: the guest
+gets 10.0.2.15 from DHCP, the host is 10.0.2.2, and `curl localhost:8080`
+reaches an `httpd` inside.
 
 `tcc` runs on sic and compiles against the same musl the ZAE tools use: the port
 ships musl's headers and static libs in `/usr/include` and `/usr/lib`, so
@@ -33,6 +51,21 @@ Adding a program: drop `bin/foo.c` with a normal `main` and run `make`; it
 shows up as `/bin/foo`. Programs are linked statically at `0x8000000000`
 (`--image-base`), because sic's user address space starts above the kernel's
 4 GiB identity map.
+
+## Installing on a machine
+
+Boot the live system from a USB stick (write `zaeboot-bios.img` or a
+`sicinstall`ed stick to it; UEFI and BIOS both work), then:
+
+```
+/ $ ls /dev            # find the target: sda/sdb (SATA), nvme0n1 (NVMe), hda (IDE)
+/ $ sicinstall /dev/sda
+```
+
+It erases the disk, writes a GPT (ESP + `sicboot` + zaefs root), installs
+zaeboot for both firmwares and copies the running system. Reboot from that
+disk. The installed system still boots from the kernel + initrd; the zaefs root
+partition is mounted on `/disk` for persistent storage.
 
 ## Building
 
