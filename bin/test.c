@@ -321,6 +321,7 @@ int main(int argc, char **argv)
     }
 
     /* loadable kernel modules: insmod creates /dev/hello, rmmod removes it */
+    if (access("/lib/modules/hello.ko", R_OK) == 0) {
     pid = fork();
     if (pid == 0) { execlp("insmod", "insmod", "/lib/modules/hello.ko", (char *)NULL); _exit(127); }
     waitpid(pid, &status, 0);
@@ -337,6 +338,9 @@ int main(int argc, char **argv)
     waitpid(pid, &status, 0);
     CHECK(WEXITSTATUS(status) == 0, "rmmod hello");
     CHECK(stat("/dev/hello", &st) != 0, "/dev/hello gone after rmmod");
+    } else {
+        printf("[test] no /lib/modules/hello.ko (modules not configured), skipping\n");
+    }
 
     /* FAT on the second NVMe disk: format, mount, write, long names readable, unmount, remount */
     if (in_vm && stat("/dev/nvme1n1", &st) == 0) {
@@ -389,8 +393,10 @@ int main(int argc, char **argv)
     waitpid(pid, &status, 0);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "pthreads test program");
 
+    /* the C compiler on the OS: compile a program with tcc, then run it (x86 only so far) */
+    int have_tcc = access("/bin/tcc", X_OK) == 0;
+    if (have_tcc) {
     printf("[test] tcc\n");
-    /* the C compiler on the OS: compile a program with tcc, then run it */
     f = fopen("/tmp/prog.c", "w");
     fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
           "int main(int argc, char **argv) {\n"
@@ -412,6 +418,34 @@ int main(int argc, char **argv)
     }
     waitpid(pid, &status, 0);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 33, "tcc-compiled program did not run correctly");
+    }
+
+#ifdef __ALTIVEC__
+    /* AltiVec: the vector unit is enabled lazily and its state must survive
+     * a context switch, a fork, and a signal handler that uses it too. */
+    printf("[test] altivec\n");
+    {
+        typedef int v4si __attribute__((vector_size(16)));
+        volatile v4si a = { 1, 2, 3, 4 }, b = { 10, 20, 30, 40 };
+        v4si c = a + b;
+        CHECK(c[0] == 11 && c[3] == 44, "vector add");
+        pid = fork();
+        if (pid == 0) {
+            v4si d = c * a;                     /* the child's own copy of the registers */
+            usleep(20000);
+            _exit(d[3] == 176 ? 21 : 22);
+        }
+        for (int i = 0; i < 50; i++) { usleep(1000); c = c + a; }    /* switch back and forth while it computes */
+        waitpid(pid, &status, 0);
+        CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 21, "child's vector state");
+        CHECK(c[0] == 61 && c[3] == 244, "parent's vector state after switches");
+        got = 0;
+        struct sigaction va = { .sa_handler = handler };
+        sigaction(SIGUSR1, &va, NULL);
+        kill(getpid(), SIGUSR1);                /* handler runs and (via libc) may use vector code */
+        CHECK(got == SIGUSR1 && c[0] == 61 && c[3] == 244, "vector state across a signal handler");
+    }
+#endif
 
     printf("[test] mmap\n");
     /* mmap: executable anonymous memory (what tcc -run needs) and a file mapping */
@@ -420,9 +454,15 @@ int main(int argc, char **argv)
                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         CHECK(code != MAP_FAILED, "mmap PROT_EXEC");
         if (code != MAP_FAILED) {
+#ifdef __powerpc__
+            /* li r3, 42 ; blr */
+            unsigned char insn[] = { 0x38, 0x60, 0x00, 0x2a, 0x4e, 0x80, 0x00, 0x20 };
+#else
             /* mov eax, 42 ; ret */
             unsigned char insn[] = { 0xb8, 0x2a, 0, 0, 0, 0xc3 };
+#endif
             memcpy(code, insn, sizeof(insn));
+            __builtin___clear_cache((char *)code, (char *)code + sizeof(insn));
             int (*fn)(void) = (int (*)(void))code;
             CHECK(fn() == 42, "executing mmap'd code");
             CHECK(mprotect(code, 4096, PROT_READ) == 0, "mprotect");
@@ -462,6 +502,7 @@ int main(int argc, char **argv)
     }
 
     /* tcc -run: compile straight to memory and execute */
+    if (have_tcc) {
     f = fopen("/tmp/run.c", "w");
     fputs("#include <stdio.h>\nint main(void){ printf(\"[run] tcc -run works\\n\"); return 44; }\n", f);
     fclose(f);
@@ -472,6 +513,7 @@ int main(int argc, char **argv)
     }
     waitpid(pid, &status, 0);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 44, "tcc -run");
+    }
 
     struct timespec a, b;
     clock_gettime(CLOCK_MONOTONIC, &a);
@@ -545,7 +587,7 @@ int main(int argc, char **argv)
         }
         clock_gettime(CLOCK_MONOTONIC, &t1);
         CHECK(ok && total == 100000, "tcp: 100000 bytes received intact, then EOF");
-        printf("[test] tcp: 100000 bytes over lo in %ld ms\n", (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000);
+        printf("[test] tcp: 100000 bytes over lo in %ld ms\n", (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000));
         CHECK(send(c, "thanks", 6, 0) == 6, "tcp: send after peer's FIN");
         close(c);
         int st;

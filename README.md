@@ -52,6 +52,12 @@ shows up as `/bin/foo`. Programs are linked statically at `0x8000000000`
 (`--image-base`), because sic's user address space starts above the kernel's
 4 GiB identity map.
 
+`make ARCH=powerpc` builds the same programs for the 32-bit big-endian
+PowerPC port (image base `0x10000000`, `build/powerpc/`); the tcc and doom
+ports are x86-only and are skipped there (modules come from the kernel build
+as on x86). `sicinstall` writes x86 boot code
+and is not useful on a Mac.
+
 ## Installing on a machine
 
 Boot the live system from a USB stick (write `zaeboot-bios.img` or a

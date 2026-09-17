@@ -23,17 +23,36 @@ endif
 SYSROOT ?= $(if $(SIC_SYSROOT),$(SIC_SYSROOT),$(HOME)/.sic/sysroot)
 export SYSROOT
 LIBC    := $(SYSROOT)/usr
-BUILD   := build
-INITRD  := $(BUILD)/initrd.tar
 
-CFLAGS  := --target=x86_64-linux-musl -std=c11 -nostdinc -isystem $(LIBC)/include \
-           -fPIE -fno-stack-protector -fno-asynchronous-unwind-tables \
+# ARCH selects the target; x86_64 is the default, powerpc is the 32-bit
+# big-endian PowerMac port (user space 0-0x7FFFFFFF, image at 0x10000000).
+ARCH ?= x86_64
+BUILD   := build/$(ARCH)
+INITRD  := $(BUILD)/initrd.tar
+ifeq ($(ARCH),powerpc)
+TARGET     := powerpc-linux-musl
+ARCH_CFLAGS := -mcpu=7450 -maltivec -fno-pic -fno-pie
+IMAGE_BASE := 0x10000000
+LD_EMUL    := -m elf32ppc
+# Ports carrying x86-only code (tcc, doom's fb path) are not built for ppc yet.
+PORTS_SKIP := tcc doom
+else
+TARGET     := x86_64-linux-musl
+ARCH_CFLAGS := -fPIE
+IMAGE_BASE := 0x8000000000
+LD_EMUL    :=
+PORTS_SKIP :=
+endif
+export ARCH TARGET ARCH_CFLAGS IMAGE_BASE LD_EMUL
+
+CFLAGS  := --target=$(TARGET) -std=c11 -nostdinc -isystem $(LIBC)/include \
+           $(ARCH_CFLAGS) -fno-stack-protector -fno-asynchronous-unwind-tables \
            -O2 -g -Wall -Wextra -D_GNU_SOURCE
 # _DYNAMIC: musl's _start takes its address with a RIP-relative lea (only
 # static-PIE uses it); as an undefined weak it would resolve to 0, out of
 # PC32 range from our image base, so give it an in-range dummy value.
-LDFLAGS := -static -nostdlib --image-base=0x8000000000 -z max-page-size=0x1000 -z noexecstack \
-           --defsym=_DYNAMIC=0x8000000000
+LDFLAGS := $(LD_EMUL) -static -nostdlib --image-base=$(IMAGE_BASE) -z max-page-size=0x1000 -z noexecstack \
+           --defsym=_DYNAMIC=$(IMAGE_BASE)
 CRT_BEGIN := $(LIBC)/lib/crt1.o $(LIBC)/lib/crti.o
 CRT_END   := $(LIBC)/lib/crtn.o
 LIBS      := $(LIBC)/lib/libc.a
@@ -41,7 +60,7 @@ LIBS      := $(LIBC)/lib/libc.a
 PROGS   := $(patsubst bin/%.c,%,$(wildcard bin/*.c))
 ELFS    := $(patsubst %,$(BUILD)/bin/%,$(PROGS))
 ROOTFS  := $(shell find rootfs -type f)
-PORTS   := $(patsubst ports/%/Makefile,%,$(wildcard ports/*/Makefile))
+PORTS   := $(filter-out $(PORTS_SKIP),$(patsubst ports/%/Makefile,%,$(wildcard ports/*/Makefile)))
 
 .PHONY: all clean ports install $(PORTS)
 
@@ -89,5 +108,5 @@ $(INITRD): $(ELFS) $(ROOTFS) ports $(wildcard $(SYSROOT)/lib/modules/*.ko) $(SYS
 	tar --format ustar -cf $@ -C $(BUILD)/root .
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf build
 	@for p in $(PORTS); do $(MAKE) -C ports/$$p clean; done
