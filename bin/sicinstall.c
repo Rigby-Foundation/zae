@@ -75,6 +75,11 @@ static void random_guid(uint8_t g[16])
 }
 
 /* GUID text -> the mixed-endian on-disk form. */
+/* MBR and GPT are little-endian on disk whatever the CPU. */
+static void w16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void w32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i)); }
+static void w64(uint8_t *p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i)); }
+
 static void parse_guid(const char *s, uint8_t g[16])
 {
     unsigned v[10];
@@ -173,16 +178,16 @@ static void write_tables(size_t stage2_sectors, uint64_t root_end)
     memset(mbr + 446, 0, 64);
     uint32_t lba32 = (uint32_t)STAGE2_LBA;
     uint16_t cnt16 = (uint16_t)stage2_sectors;
-    memcpy(mbr + 432, &lba32, 4);
-    memcpy(mbr + 436, &cnt16, 2);
+    w32(mbr + 432, lba32);
+    w16(mbr + 436, cnt16);
     /* protective partition: type 0xEE from LBA 1 to the end (capped) */
     uint8_t *pe = mbr + 446;
     pe[1] = 0x00; pe[2] = 0x02; pe[3] = 0x00;      /* CHS start 0/0/2 */
     pe[4] = 0xEE;
     pe[5] = 0xFF; pe[6] = 0xFF; pe[7] = 0xFF;
     uint32_t pstart = 1, psize = total_sectors - 1 > 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)(total_sectors - 1);
-    memcpy(pe + 8, &pstart, 4);
-    memcpy(pe + 12, &psize, 4);
+    w32(pe + 8, pstart);
+    w32(pe + 12, psize);
     mbr[510] = 0x55; mbr[511] = 0xAA;
     write_at(0, mbr, 512);
 
@@ -198,8 +203,8 @@ static void write_tables(size_t stage2_sectors, uint64_t root_end)
         uint8_t *e = entries + i * 128;
         parse_guid(parts[i].type, e);
         random_guid(e + 16);
-        memcpy(e + 32, &parts[i].first, 8);
-        memcpy(e + 40, &parts[i].last, 8);
+        w64(e + 32, parts[i].first);
+        w64(e + 40, parts[i].last);
         for (size_t k = 0; parts[i].name[k] && k < 36; k++) e[56 + k * 2] = (uint8_t)parts[i].name[k];
     }
     uint32_t ecrc = crc32(entries, sizeof(entries));
@@ -210,23 +215,23 @@ static void write_tables(size_t stage2_sectors, uint64_t root_end)
     uint32_t rev = 0x00010000, hsize = 92, zero = 0;
     uint64_t cur = 1, backup = total_sectors - 1, first = 34, last = total_sectors - 34, elba = 2;
     uint32_t ecount = GPT_ENTRIES, esize = 128;
-    memcpy(hdr + 8, &rev, 4); memcpy(hdr + 12, &hsize, 4); memcpy(hdr + 16, &zero, 4);
-    memcpy(hdr + 24, &cur, 8); memcpy(hdr + 32, &backup, 8);
-    memcpy(hdr + 40, &first, 8); memcpy(hdr + 48, &last, 8);
+    w32(hdr + 8, rev); w32(hdr + 12, hsize); w32(hdr + 16, zero);
+    w64(hdr + 24, cur); w64(hdr + 32, backup);
+    w64(hdr + 40, first); w64(hdr + 48, last);
     random_guid(hdr + 56);
-    memcpy(hdr + 72, &elba, 8); memcpy(hdr + 80, &ecount, 4); memcpy(hdr + 84, &esize, 4);
-    memcpy(hdr + 88, &ecrc, 4);
+    w64(hdr + 72, elba); w32(hdr + 80, ecount); w32(hdr + 84, esize);
+    w32(hdr + 88, ecrc);
     uint32_t hcrc = crc32(hdr, 92);
-    memcpy(hdr + 16, &hcrc, 4);
+    w32(hdr + 16, hcrc);
     write_at(1, hdr, 512);
     write_at(2, entries, sizeof(entries));
 
     /* backup: entries just before the last sector, header in the last sector */
     uint64_t bentries = total_sectors - 33;
-    memcpy(hdr + 24, &backup, 8); memcpy(hdr + 32, &cur, 8); memcpy(hdr + 72, &bentries, 8);
-    memcpy(hdr + 16, &zero, 4);
+    w64(hdr + 24, backup); w64(hdr + 32, cur); w64(hdr + 72, bentries);
+    w32(hdr + 16, zero);
     hcrc = crc32(hdr, 92);
-    memcpy(hdr + 16, &hcrc, 4);
+    w32(hdr + 16, hcrc);
     write_at(bentries, entries, sizeof(entries));
     write_at(backup, hdr, 512);
 }

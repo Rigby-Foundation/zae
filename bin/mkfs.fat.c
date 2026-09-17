@@ -11,6 +11,10 @@
 #define SS 512
 
 static int fd;
+/* FAT is little-endian on disk whatever the CPU. */
+static void w16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void w32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i)); }
+
 static int put(uint64_t sector, const void *buf, size_t n)
 {
     if (lseek(fd, (off_t)(sector * SS), SEEK_SET) < 0) return -1;
@@ -60,25 +64,25 @@ int main(int argc, char **argv)
         if (bits == 16 && clusters < 4085) { fprintf(stderr, "mkfs.fat: device too small for FAT16\n"); return 1; }
     }
 
-    memcpy(bs + 11, &bps, 2);
+    w16(bs + 11, bps);
     bs[13] = spc;
-    memcpy(bs + 14, &reserved, 2);
+    w16(bs + 14, reserved);
     bs[16] = fats;
-    memcpy(bs + 17, &root_entries, 2);
-    if (total < 0x10000) { uint16_t t16 = (uint16_t)total; memcpy(bs + 19, &t16, 2); } else memcpy(bs + 32, &total, 4);
+    w16(bs + 17, root_entries);
+    if (total < 0x10000) w16(bs + 19, (uint16_t)total); else w32(bs + 32, total);
     bs[21] = 0xF8;
-    uint16_t spt = 63, heads = 255; memcpy(bs + 24, &spt, 2); memcpy(bs + 26, &heads, 2);
+    w16(bs + 24, 63); w16(bs + 26, 255);                    /* sectors per track, heads */
     uint32_t volid = 0x51C0FA7 + (uint32_t)total;
     if (bits == 32) {
-        memcpy(bs + 36, &fat_sectors, 4);
-        uint32_t root_cluster = 2; memcpy(bs + 44, &root_cluster, 4);
-        uint16_t fsinfo = 1, backup = 6; memcpy(bs + 48, &fsinfo, 2); memcpy(bs + 50, &backup, 2);
-        bs[64] = 0x80; bs[66] = 0x29; memcpy(bs + 67, &volid, 4);
+        w32(bs + 36, fat_sectors);
+        w32(bs + 44, 2);                                    /* root cluster */
+        w16(bs + 48, 1); w16(bs + 50, 6);                   /* FSInfo, backup boot sector */
+        bs[64] = 0x80; bs[66] = 0x29; w32(bs + 67, volid);
         memset(bs + 71, ' ', 11); memcpy(bs + 71, label, strlen(label) < 11 ? strlen(label) : 11);
         memcpy(bs + 82, "FAT32   ", 8);
     } else {
-        uint16_t f16 = (uint16_t)fat_sectors; memcpy(bs + 22, &f16, 2);
-        bs[36] = 0x80; bs[38] = 0x29; memcpy(bs + 39, &volid, 4);
+        w16(bs + 22, (uint16_t)fat_sectors);
+        bs[36] = 0x80; bs[38] = 0x29; w32(bs + 39, volid);
         memset(bs + 43, ' ', 11); memcpy(bs + 43, label, strlen(label) < 11 ? strlen(label) : 11);
         memcpy(bs + 54, "FAT16   ", 8);
     }
@@ -87,8 +91,7 @@ int main(int argc, char **argv)
     if (bits == 32) {
         put(6, bs, SS);                                     /* backup boot sector */
         uint8_t fsi[SS]; memset(fsi, 0, SS);
-        uint32_t lead = 0x41615252, sig = 0x61417272, free_c = clusters - 1, next = 3, trail = 0xAA550000;
-        memcpy(fsi, &lead, 4); memcpy(fsi + 484, &sig, 4); memcpy(fsi + 488, &free_c, 4); memcpy(fsi + 492, &next, 4); memcpy(fsi + 508, &trail, 4);
+        w32(fsi, 0x41615252); w32(fsi + 484, 0x61417272); w32(fsi + 488, clusters - 1); w32(fsi + 492, 3); w32(fsi + 508, 0xAA550000);
         put(1, fsi, SS);
     }
 
@@ -98,8 +101,8 @@ int main(int argc, char **argv)
         for (uint32_t s = 0; s < fat_sectors; s++)
             if (put(reserved + f * fat_sectors + s, zero, SS) != 0) { perror("write FAT"); return 1; }
     uint8_t first[SS]; memset(first, 0, SS);
-    if (bits == 32) { uint32_t e[3] = { 0x0FFFFFF8, 0x0FFFFFFF, 0x0FFFFFFF }; memcpy(first, e, 12); }
-    else { uint16_t e[2] = { 0xFFF8, 0xFFFF }; memcpy(first, e, 4); }
+    if (bits == 32) { w32(first, 0x0FFFFFF8); w32(first + 4, 0x0FFFFFFF); w32(first + 8, 0x0FFFFFFF); }
+    else { w16(first, 0xFFF8); w16(first + 2, 0xFFFF); }
     for (uint32_t f = 0; f < fats; f++) put(reserved + f * fat_sectors, first, SS);
 
     /* Root directory: fixed area (FAT16) or cluster 2 (FAT32), zeroed. */

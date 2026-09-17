@@ -86,12 +86,14 @@ int main(int argc, char **argv)
     root->type = ZAEFS_TYPE_DIR;
     root->links = 1;
     root->mode = 0755;
+    ZAEFS_INODE_SWAP(root);                         /* the disk is little-endian */
     if (put_block(sb.itable_start, zero) != 0) { perror("write"); return 1; }
     free(zero);
 
-    if (put_block(0, &sb) != 0) { perror("write superblock"); return 1; }
-    close(fd);
     printf("mkfs.zaefs: %s: %llu blocks of %u bytes, %llu inodes, label \"%s\"\n",
            dev, (unsigned long long)sb.total_blocks, BS, (unsigned long long)sb.inode_count, sb.label);
+    ZAEFS_SB_SWAP(&sb);
+    if (put_block(0, &sb) != 0) { perror("write superblock"); return 1; }
+    close(fd);
     return 0;
 }
