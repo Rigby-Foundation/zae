@@ -35,7 +35,13 @@ ARCH_CFLAGS := -mcpu=7450 -maltivec -fno-pic -fno-pie
 IMAGE_BASE := 0x10000000
 LD_EMUL    := -m elf32ppc
 # Ports carrying x86-only code (tcc, doom's fb path) are not built for ppc yet.
-PORTS_SKIP := tcc doom
+PORTS_SKIP := tcc doom python2 zlib
+else ifeq ($(ARCH),aarch64)
+TARGET     := aarch64-linux-musl
+ARCH_CFLAGS := -fPIE
+IMAGE_BASE := 0x8000000000
+LD_EMUL    := -m aarch64elf
+PORTS_SKIP := tcc doom        # tcc generates x86; doom's framebuffer path is x86 too
 else
 TARGET     := x86_64-linux-musl
 ARCH_CFLAGS := -fPIE
@@ -43,6 +49,7 @@ IMAGE_BASE := 0x8000000000
 LD_EMUL    :=
 PORTS_SKIP :=
 endif
+ARCH_SUFFIX := $(if $(filter x86_64,$(ARCH)),,-$(ARCH))   # a port staging per architecture uses build/root-<arch>
 export ARCH TARGET ARCH_CFLAGS IMAGE_BASE LD_EMUL
 
 CFLAGS  := --target=$(TARGET) -std=c11 -nostdinc -isystem $(LIBC)/include \
@@ -55,7 +62,7 @@ LDFLAGS := $(LD_EMUL) -static -nostdlib --image-base=$(IMAGE_BASE) -z max-page-s
            --defsym=_DYNAMIC=$(IMAGE_BASE)
 CRT_BEGIN := $(LIBC)/lib/crt1.o $(LIBC)/lib/crti.o
 CRT_END   := $(LIBC)/lib/crtn.o
-LIBS      := $(LIBC)/lib/libc.a
+LIBS      := $(LIBC)/lib/libc.a $(wildcard $(LIBC)/lib/libcompiler_rt.a)   # the soft-float builtins, where the libc needs them (aarch64)
 
 PROGS   := $(patsubst bin/%.c,%,$(wildcard bin/*.c))
 ELFS    := $(patsubst %,$(BUILD)/bin/%,$(PROGS))
@@ -97,14 +104,19 @@ $(BUILD)/%.o: %.c $(LIBC)/lib/libc.a
 
 # Layout: /bin/<prog> plus everything under rootfs/ (etc/motd, ...); /dev and
 # /tmp exist so the kernel can populate them.
-$(INITRD): $(ELFS) $(ROOTFS) ports $(wildcard $(SYSROOT)/lib/modules/*.ko) $(SYSROOT)/boot/sic.elf $(wildcard $(SYSROOT)/boot/zaeboot/*)
+# Optional packages (a window manager, ...) install a tree into
+# $(SYSROOT)/rootfs and it is overlaid onto the image as-is.
+OVERLAY := $(shell find $(SYSROOT)/rootfs -type f 2>/dev/null)
+
+$(INITRD): $(ELFS) $(ROOTFS) ports $(wildcard $(SYSROOT)/lib/modules/*.ko) $(SYSROOT)/boot/sic.elf $(wildcard $(SYSROOT)/boot/zaeboot/*) $(OVERLAY)
 	@rm -rf $(BUILD)/root && mkdir -p $(BUILD)/root/bin $(BUILD)/root/dev $(BUILD)/root/tmp
 	@cp -R rootfs/. $(BUILD)/root/
 	@cp $(ELFS) $(BUILD)/root/bin/
-	@for p in $(PORTS); do cp -R ports/$$p/build/root/. $(BUILD)/root/; done
+	@for p in $(PORTS); do r=ports/$$p/build/root$(ARCH_SUFFIX); [ -d $$r ] || r=ports/$$p/build/root; [ ! -d $$r ] || cp -R $$r/. $(BUILD)/root/; done
 	@mkdir -p $(BUILD)/root/boot && cp $(SYSROOT)/boot/sic.elf $(BUILD)/root/boot/ && \
 	    { [ -d $(SYSROOT)/boot/zaeboot ] && cp -R $(SYSROOT)/boot/zaeboot $(BUILD)/root/boot/ || echo "note: no $(SYSROOT)/boot/zaeboot (run 'zig build sysroot' in zaeboot); sicinstall won't work"; }
 	@mkdir -p $(BUILD)/root/lib/modules && cp $(SYSROOT)/lib/modules/*.ko $(BUILD)/root/lib/modules/ 2>/dev/null || true
+	@[ ! -d $(SYSROOT)/rootfs ] || cp -R $(SYSROOT)/rootfs/. $(BUILD)/root/
 	tar --format ustar -cf $@ -C $(BUILD)/root .
 
 clean:

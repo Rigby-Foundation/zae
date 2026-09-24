@@ -12,11 +12,13 @@ bin/      one C file per program -> /bin/<name>
 rootfs/   copied verbatim into the image (/etc/motd, /usr/src/hello.c, ...)
 ports/    third-party software, one directory per package with its own Makefile,
           patches/ and fetch rule; each installs into ports/<name>/build/root,
-          overlaid onto the image. Currently: tcc (the Tiny C Compiler) and
+          overlaid onto the image. Currently: tcc (the Tiny C Compiler),
           doom (doomgeneric with Freedoom Phase 1 as the game data - id's
           shareware WAD isn't redistributable; `make DOOM_WAD=none` leaves
-          the data out and `doom -iwad /disk/doom.wad` uses your own).
-          Video is `/dev/fb0`, input is `/dev/console` in raw scancode mode.
+          the data out and `doom -iwad /disk/doom.wad` uses your own;
+          video is `/dev/fb0`, input is `/dev/console` in raw scancode mode),
+          python2 (Python 2.7.13, static, `python2 -m sictest`) and zlib
+          (a library for the others: installs into the sysroot, not the image).
 ```
 
 Programs: `init` (prints `/etc/motd`, sets PATH, mounts the first zaefs volume it
@@ -29,7 +31,7 @@ formatted NVMe scratch disk in QEMU — and respawns the shell), `sh`
 (persistent storage; `mount -t fat`), `sicinstall` (installs the running system
 onto a disk: GPT with an ESP for UEFI, a raw boot partition for BIOS and a zaefs
 root — one disk boots on both firmwares), `insmod`/`rmmod`/`lsmod` (kernel modules, shipped in `/lib/modules` from the
-kernel build), `test` (libc/fork/exec/wait/pipes/signals/threads/filesystem/zaefs/FAT/mmap/modules/tcc/sockets self test, run by
+kernel build), `beep` (a sine wave through `/dev/dsp`), `test` (libc/fork/exec/wait/pipes/signals/threads/filesystem/zaefs/FAT/mmap/modules/tcc/sockets self test, run by
 the kernel at boot if present).
 
 Networking: `net` (show interfaces; `net eth0 ADDR MASK [GATEWAY]`, `net dns
@@ -53,10 +55,15 @@ shows up as `/bin/foo`. Programs are linked statically at `0x8000000000`
 4 GiB identity map.
 
 `make ARCH=powerpc` builds the same programs for the 32-bit big-endian
-PowerPC port (image base `0x10000000`, `build/powerpc/`); the tcc and doom
-ports are x86-only and are skipped there (modules come from the kernel build
+PowerPC port (image base `0x10000000`, `build/powerpc/`); the tcc, doom,
+python2 and zlib ports are x86-only and are skipped there (modules come from the kernel build
 as on x86). `sicinstall` writes x86 boot code
-and is not useful on a Mac.
+and is not useful on a Mac. `make ARCH=aarch64` likewise (image base
+`0x8000000000`, `build/aarch64/`, linked with the libc's `libcompiler_rt.a`).
+
+Optional packages (the zwm window server and the zde desktop live in their
+own repos) install a tree into `$SYSROOT/rootfs/`, which `make` overlays
+onto the image as-is.
 
 ## Installing on a machine
 
@@ -98,5 +105,6 @@ Patches need a `Signed-off-by:` line (DCO 1.1). Read
 Copyright (C) 2026 Rigby Foundation. Licensed under the GNU General Public
 License, version 2 only (`SPDX-License-Identifier: GPL-2.0-only`); see
 `LICENSE`. Every source file carries an SPDX tag. Third-party software under `ports/` keeps its own licence
-(tcc: LGPL-2.1-or-later, see `ports/tcc/NOTICE`); only the port glue is ours.
+(tcc: LGPL-2.1-or-later, see `ports/tcc/NOTICE`; Python: PSF licence; zlib:
+zlib licence); only the port glue is ours.
 
