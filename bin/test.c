@@ -16,9 +16,11 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <sys/un.h>
 #include <arpa/inet.h>
 #include <sys/mman.h>
 #include <linux/fb.h>
+#include <abi/shm.h>
 
 static int fails;
 static volatile sig_atomic_t got;
@@ -314,6 +316,9 @@ int main(int argc, char **argv)
         while (d && (e = readdir(d))) if (strcmp(e->d_name, "big.bin") == 0) seen = 1;
         if (d) closedir(d);
         CHECK(seen, "zaefs readdir");
+        CHECK(rename("/disk/dir/big.bin", "/disk/moved.bin") == 0 && stat("/disk/moved.bin", &st) == 0 && st.st_size == 409600
+              && stat("/disk/dir/big.bin", &st) != 0, "zaefs rename across directories");
+        CHECK(rename("/disk/moved.bin", "/disk/dir/big.bin") == 0, "zaefs rename back");
         CHECK(unlink("/disk/dir/big.bin") == 0 && rmdir("/disk/dir") == 0, "zaefs unlink/rmdir");
         CHECK(stat("/disk/dir", &st) != 0, "zaefs dir gone after rmdir");
     } else {
@@ -457,6 +462,9 @@ int main(int argc, char **argv)
 #ifdef __powerpc__
             /* li r3, 42 ; blr */
             unsigned char insn[] = { 0x38, 0x60, 0x00, 0x2a, 0x4e, 0x80, 0x00, 0x20 };
+#elif defined(__aarch64__)
+            /* mov w0, #42 ; ret */
+            unsigned char insn[] = { 0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6 };
 #else
             /* mov eax, 42 ; ret */
             unsigned char insn[] = { 0xb8, 0x2a, 0, 0, 0, 0xc3 };
@@ -477,6 +485,38 @@ int main(int argc, char **argv)
         CHECK(m != MAP_FAILED && strncmp(m, "Welcome", 7) == 0, "file mmap");
         if (m != MAP_FAILED) munmap(m, 4096);
         close(mfd);
+    }
+
+    /* shared memory: a segment created here, attached by key in a child */
+    printf("[test] shared memory\n");
+    {
+        int sfd = open("/dev/shmem", O_RDWR);
+        struct shm_segment seg = { .size = 3 * 4096 + 1 };
+        CHECK(sfd >= 0 && ioctl(sfd, SHM_IOC_CREATE, &seg) == 0 && seg.size == 4 * 4096 && seg.key != 0, "shm create");
+        uint32_t *m = mmap(NULL, seg.size, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
+        CHECK(m != MAP_FAILED && m[0] == 0 && m[4095] == 0, "shm mmap, zeroed");
+        m[0] = 0x11111111;
+        pid_t pid = fork();
+        if (pid == 0) {
+            int cfd = open("/dev/shmem", O_RDWR);
+            struct shm_segment at = { .key = seg.key };
+            if (ioctl(cfd, SHM_IOC_ATTACH, &at) != 0 || at.size != seg.size) _exit(1);
+            uint32_t *cm = mmap(NULL, at.size, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, 0);
+            if (cm == MAP_FAILED || cm[0] != 0x11111111) _exit(2);
+            cm[4095] = 0x22222222;              /* the last page too */
+            m[1] = 0x33333333;                  /* the inherited mapping is the same memory */
+            _exit(0);
+        }
+        int st;
+        waitpid(pid, &st, 0);
+        CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "shm child attach");
+        CHECK(m[4095] == 0x22222222 && m[1] == 0x33333333, "shm shared both ways");
+        munmap(m, seg.size);
+        close(sfd);
+        int probe = open("/dev/shmem", O_RDWR);
+        struct shm_segment gone = { .key = seg.key };
+        CHECK(ioctl(probe, SHM_IOC_ATTACH, &gone) < 0 && errno == ENOENT, "shm freed with its last file");
+        close(probe);
     }
 
     /* framebuffer: /dev/fb0 open, ioctl, and mmap */
@@ -599,6 +639,92 @@ int main(int argc, char **argv)
         CHECK(connect(probe, (struct sockaddr *)&na, sizeof na) < 0 && errno == ECONNREFUSED, "connect to closed port refused");
         close(probe);
         printf("[test] loopback udp/tcp/poll ok\n");
+    }
+
+    /* rename: a file moved and renamed on tmpfs, replacing an existing target */
+    {
+        mkdir("/tmp/rn", 0755);
+        FILE *rf = fopen("/tmp/rn/a.txt", "w"); fputs("first", rf); fclose(rf);
+        rf = fopen("/tmp/rn/b.txt", "w"); fputs("second", rf); fclose(rf);
+        CHECK(rename("/tmp/rn/a.txt", "/tmp/rn/b.txt") == 0, "rename over an existing file");
+        char rb[16] = { 0 };
+        rf = fopen("/tmp/rn/b.txt", "r"); if (rf) { fread(rb, 1, 15, rf); fclose(rf); }
+        CHECK(strcmp(rb, "first") == 0 && access("/tmp/rn/a.txt", F_OK) != 0, "renamed content, old name gone");
+        mkdir("/tmp/rn/sub", 0755);
+        CHECK(rename("/tmp/rn/b.txt", "/tmp/rn/sub/c.txt") == 0 && access("/tmp/rn/sub/c.txt", F_OK) == 0, "rename into another directory");
+        CHECK(rename("/tmp/rn/nope", "/tmp/rn/x") < 0 && errno == ENOENT, "rename of a missing file");
+        unlink("/tmp/rn/sub/c.txt"); rmdir("/tmp/rn/sub"); rmdir("/tmp/rn");
+    }
+
+    /* fcntl record locks: whole-file, one holder */
+    {
+        int l1 = open("/tmp/lock.test", O_RDWR | O_CREAT, 0644), l2 = open("/tmp/lock.test", O_RDWR);
+        struct flock fl = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
+        CHECK(l1 >= 0 && fcntl(l1, F_SETLK, &fl) == 0, "F_SETLK takes the lock");
+        CHECK(fcntl(l2, F_SETLK, &fl) < 0 && (errno == EAGAIN || errno == EACCES), "a second open file is refused");
+        struct flock q = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
+        CHECK(fcntl(l2, F_GETLK, &q) == 0 && q.l_type == F_WRLCK && q.l_pid == getpid(), "F_GETLK reports the holder");
+        close(l1);
+        CHECK(fcntl(l2, F_SETLK, &fl) == 0, "the lock dies with its file");
+        close(l2); unlink("/tmp/lock.test");
+    }
+
+    /* AF_UNIX: a stream between two processes, 4 MB through it, poll, hangup */
+    {
+        int l = socket(AF_UNIX, SOCK_STREAM, 0);
+        struct sockaddr_un ua = { .sun_family = AF_UNIX, .sun_path = "/tmp/test.sock" };
+        CHECK(l >= 0 && bind(l, (struct sockaddr *)&ua, sizeof ua) == 0 && listen(l, 4) == 0, "unix bind/listen");
+        int dup_l = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(bind(dup_l, (struct sockaddr *)&ua, sizeof ua) < 0 && errno == EADDRINUSE, "unix name in use");
+        close(dup_l);
+        const size_t bigsz = 4u << 20;
+        pid_t child = fork();
+        if (child == 0) {
+            int c = socket(AF_UNIX, SOCK_STREAM, 0);
+            if (connect(c, (struct sockaddr *)&ua, sizeof ua) != 0) _exit(1);
+            char *big = malloc(bigsz);
+            for (size_t i = 0; i < bigsz; i++) big[i] = (char)(i * 13);
+            size_t off = 0;
+            while (off < bigsz) {
+                ssize_t w = send(c, big + off, bigsz - off, 0);
+                if (w <= 0) _exit(2);
+                off += (size_t)w;
+            }
+            char echo[16];
+            if (recv(c, echo, sizeof echo, 0) != 6 || memcmp(echo, "thanks", 6) != 0) _exit(3);
+            if (recv(c, echo, sizeof echo, 0) != 0) _exit(4);   /* EOF when the server closes */
+            close(c);
+            _exit(0);
+        }
+        struct pollfd lp = { .fd = l, .events = POLLIN };
+        CHECK(poll(&lp, 1, 2000) == 1 && (lp.revents & POLLIN), "unix listener pollable");
+        int c = accept(l, NULL, NULL);
+        CHECK(c >= 0, "unix accept");
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        size_t total = 0;
+        int ok = 1;
+        static char rb[65536];
+        while (total < bigsz) {
+            ssize_t r = recv(c, rb, sizeof rb, 0);
+            if (r <= 0) { ok = 0; break; }
+            for (ssize_t i = 0; i < r; i += 61)
+                if (rb[i] != (char)((total + (size_t)i) * 13)) ok = 0;
+            total += (size_t)r;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        CHECK(ok && total == bigsz, "unix: 4 MB received intact");
+        printf("[test] unix: 4 MB over a socket in %ld ms\n", (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000));
+        CHECK(send(c, "thanks", 6, 0) == 6, "unix: reply");
+        close(c);
+        int st;
+        waitpid(child, &st, 0);
+        CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "unix client side");
+        close(l);
+        int probe = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(connect(probe, (struct sockaddr *)&ua, sizeof ua) < 0 && errno == ENOENT, "unix: name gone after close");
+        close(probe);
+        printf("[test] unix sockets ok\n");
     }
 
     printf("[test] done: %d failure(s)\n", fails);
