@@ -1,0 +1,17 @@
+--- a/Python/import.c	2026-09-18 01:54:04
++++ b/Python/import.c	2026-09-18 01:54:04
+@@ -1400,6 +1400,14 @@
+         PyErr_Format(PyExc_ImportError,
+                      "No frozen submodule named %.200s", name);
+         goto error_exit;
++    }
++    /* sic: extension modules of packages are built in too (there are no
++       shared objects); they are registered under their dotted name. */
++    if (path != NULL && fullname != NULL && strchr(fullname, '.') != NULL && is_builtin(fullname)
++        && strlen(fullname) < (size_t)buflen) {
++        strcpy(buf, fullname);
++        PyMem_FREE(name);
++        return &fd_builtin;
+     }
+     if (path == NULL) {
+         if (is_builtin(name)) {
