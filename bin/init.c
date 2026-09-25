@@ -23,21 +23,33 @@ int main(void)
     setenv("PATH", "/bin", 1);
     setenv("HOME", "/", 1);
 
-    /* Persistent storage: mount the first zaefs volume found on /disk (an
-     * installed system's root partition, or a whole disk used as scratch). */
+    /* Persistent storage: the first zaefs volume found goes on /disk (an
+     * installed system's root partition, or a whole disk used as scratch);
+     * any further ones (a game disk made with mkzaefs.py) on /mnt/<device>. */
     {
         DIR *d = opendir("/dev");
         struct dirent *e;
         int mounted = 0;
-        while (d && !mounted && (e = readdir(d))) {
-            char path[64];
+        while (d && (e = readdir(d))) {
+            char path[64], where[80];
             struct stat st;
             snprintf(path, sizeof(path), "/dev/%s", e->d_name);
             if (strcmp(e->d_name, "initrd") == 0 || stat(path, &st) != 0 || !S_ISBLK(st.st_mode)) continue;
-            if (mount(path, "/disk", "zaefs", 0, NULL) == 0) {
+            if (!mounted && mount(path, "/disk", "zaefs", 0, NULL) == 0) {
                 printf("init: mounted %s on /disk\n", path);
-                mounted = 1;
+                mounted++;
+                continue;
             }
+            if (!mounted && errno == EBUSY)
+                mounted++;                  /* the kernel's self test left a volume on /disk; this may or may not be it */
+            if (!mounted) continue;         /* not a zaefs volume */
+            snprintf(where, sizeof(where), "/mnt/%s", e->d_name);
+            mkdir("/mnt", 0755); mkdir(where, 0755);
+            if (mount(path, where, "zaefs", 0, NULL) == 0) {
+                printf("init: mounted %s on %s\n", path, where);
+                mounted++;
+            } else
+                rmdir(where);               /* the one on /disk, or no volume */
         }
         if (d) closedir(d);
         if (!mounted)
