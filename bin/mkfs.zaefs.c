@@ -13,12 +13,19 @@
 
 static int fd;
 
-static int put_block(uint64_t blk, const void *buf)
+static int put_blocks(uint64_t blk, const void *buf, uint64_t n)
 {
     if (lseek(fd, (off_t)(blk * BS), SEEK_SET) < 0)
         return -1;
-    return write(fd, buf, BS) == BS ? 0 : -1;
+    const uint8_t *p = buf;
+    for (uint64_t left = n * BS; left; ) {
+        ssize_t w = write(fd, p, left > (1u << 20) ? (1u << 20) : left);
+        if (w <= 0) return -1;
+        p += w; left -= (uint64_t)w;
+    }
+    return 0;
 }
+static int put_block(uint64_t blk, const void *buf) { return put_blocks(blk, buf, 1); }
 
 static void set_bit(uint8_t *bitmap, uint64_t i) { bitmap[i / 8] |= (uint8_t)(1 << (i % 8)); }
 
@@ -67,21 +74,19 @@ int main(int argc, char **argv)
     /* Block bitmap: metadata blocks used. */
     uint8_t *bitmap = calloc(sb.bbitmap_blocks, BS);
     for (uint64_t b = 0; b < sb.data_start; b++) set_bit(bitmap, b);
-    for (uint64_t b = 0; b < sb.bbitmap_blocks; b++)
-        if (put_block(sb.bbitmap_start + b, bitmap + b * BS) != 0) { perror("write"); return 1; }
+    if (put_blocks(sb.bbitmap_start, bitmap, sb.bbitmap_blocks) != 0) { perror("write"); return 1; }
     free(bitmap);
 
-    /* Inode bitmap: 0 and root used. Inode table: zeroed, root initialised. */
+    /* Inode bitmap: 0 and root used. Inode table: only the root's block is
+     * written; the kernel fills an inode in whole when it allocates it, so
+     * the rest (gigabytes on a big disk) need not be zeroed. */
     uint8_t *ibitmap = calloc(sb.ibitmap_blocks, BS);
     set_bit(ibitmap, 0);
     set_bit(ibitmap, ZAEFS_ROOT_INO);
-    for (uint64_t b = 0; b < sb.ibitmap_blocks; b++)
-        if (put_block(sb.ibitmap_start + b, ibitmap + b * BS) != 0) { perror("write"); return 1; }
+    if (put_blocks(sb.ibitmap_start, ibitmap, sb.ibitmap_blocks) != 0) { perror("write"); return 1; }
     free(ibitmap);
 
     uint8_t *zero = calloc(1, BS);
-    for (uint64_t b = 0; b < sb.itable_blocks; b++)
-        if (put_block(sb.itable_start + b, zero) != 0) { perror("write"); return 1; }
     struct zaefs_inode *root = (struct zaefs_inode *)(zero + ZAEFS_ROOT_INO * ZAEFS_INODE_SIZE);
     root->type = ZAEFS_TYPE_DIR;
     root->links = 1;
