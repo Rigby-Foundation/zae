@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Copyright (C) 2026 Rigby Foundation */
-/* PID 1: prints the motd, then keeps a shell running. */
+/* PID 1: prints the motd, then keeps a shell running (or the program
+ * named in /etc/session: a phone has no keyboard for a shell), and one on
+ * the USB serial line if there is one. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -10,6 +12,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <fcntl.h>
 
 int main(void)
 {
@@ -66,11 +69,39 @@ int main(void)
         }
     }
 
+    /* A USB serial line (a phone's): a shell on it too, kept running. */
+    if (access("/dev/ttyGS0", F_OK) == 0 && fork() == 0) {
+        for (;;) {
+            pid_t sh = fork();
+            if (sh == 0) {
+                int fd = open("/dev/ttyGS0", O_RDWR);
+                if (fd < 0) _exit(1);
+                dup2(fd, 0); dup2(fd, 1); dup2(fd, 2);
+                if (fd > 2) close(fd);
+                printf("\nsic shell over USB. try: help\n");
+                fflush(stdout);
+                execl("/bin/sh", "sh", (char *)NULL);
+                _exit(1);
+            }
+            int st;
+            if (sh > 0) waitpid(sh, &st, 0);
+            sleep(1);
+        }
+    }
+
+    char session[128] = "/bin/sh";
+    FILE *sf = fopen("/etc/session", "r");
+    if (sf) {
+        if (fgets(session, sizeof session, sf)) session[strcspn(session, "\n")] = 0;
+        if (!session[0]) snprintf(session, sizeof session, "/bin/sh");
+        fclose(sf);
+    }
     for (;;) {
         pid_t pid = fork();
         if (pid == 0) {
-            execl("/bin/sh", "sh", (char *)NULL);
-            perror("init: exec /bin/sh");
+            const char *name = strrchr(session, '/');
+            execl(session, name ? name + 1 : session, (char *)NULL);
+            perror(session);
             _exit(1);
         }
         if (pid < 0) {
