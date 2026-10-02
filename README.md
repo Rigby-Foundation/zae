@@ -50,7 +50,9 @@ ships musl's headers and static libs in `/usr/include` and `/usr/lib`, so
 binaries get the sic image base and OS/ABI byte; `-run` is not supported yet.
 
 Adding a program: drop `bin/foo.c` with a normal `main` and run `make`; it
-shows up as `/bin/foo`. Programs are linked statically at `0x8000000000`
+shows up as `/bin/foo`. `bin/foo.cpp` works too: C++20 on LLVM's libc++,
+libc++abi and libunwind (`ports/libcxx`, built from the sources Zig ships
+and installed into the sysroot first); `cxxtest` checks them. Programs are linked statically at `0x8000000000`
 (`--image-base`), because sic's user address space starts above the kernel's
 4 GiB identity map.
 
@@ -106,5 +108,5 @@ Copyright (C) 2026 Rigby Foundation. Licensed under the GNU General Public
 License, version 2 only (`SPDX-License-Identifier: GPL-2.0-only`); see
 `LICENSE`. Every source file carries an SPDX tag. Third-party software under `ports/` keeps its own licence
 (tcc: LGPL-2.1-or-later, see `ports/tcc/NOTICE`; Python: PSF licence; zlib:
-zlib licence); only the port glue is ours.
+zlib licence; libc++: Apache-2.0 with LLVM exceptions); only the port glue is ours.
 

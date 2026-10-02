@@ -66,6 +66,17 @@ LIBS      := $(LIBC)/lib/libc.a $(wildcard $(LIBC)/lib/libcompiler_rt.a)   # the
 
 PROGS   := $(patsubst bin/%.c,%,$(wildcard bin/*.c))
 ELFS    := $(patsubst %,$(BUILD)/bin/%,$(PROGS))
+
+# C++ programs (bin/*.cpp) use libc++ from ports/libcxx, installed into the
+# sysroot before they build; --eh-frame-hdr is how libunwind finds the
+# exception tables of a static program.
+CXX       := $(if $(LLVM_PREFIX),$(LLVM_PREFIX)/bin/clang++,clang++)
+CXXFLAGS  := --target=$(TARGET) -std=c++20 -nostdinc -nostdinc++ -isystem $(LIBC)/include/c++/v1 -isystem $(LIBC)/include \
+             $(ARCH_CFLAGS) -fno-stack-protector -O2 -g -Wall -Wextra -D_GNU_SOURCE
+CXX_LIBS  := $(LIBC)/lib/libc++.a $(LIBC)/lib/libc++abi.a $(LIBC)/lib/libunwind.a
+CXX_PROGS := $(patsubst bin/%.cpp,%,$(wildcard bin/*.cpp))
+CXX_ELFS  := $(patsubst %,$(BUILD)/bin/%,$(CXX_PROGS))
+ELFS      += $(CXX_ELFS)
 ROOTFS  := $(shell find rootfs -type f)
 PORTS   := $(filter-out $(PORTS_SKIP),$(patsubst ports/%/Makefile,%,$(wildcard ports/*/Makefile)))
 
@@ -96,6 +107,17 @@ $(BUILD)/bin/%: $(BUILD)/bin/%.o $(LIBC)/lib/libc.a
 	$(LD) $(LDFLAGS) -o $@ $(CRT_BEGIN) $< $(LIBS) $(CRT_END)
 	@$(call stamp-osabi,$@)
 
+$(CXX_LIBS):
+	$(MAKE) -C ports/libcxx install
+
+$(CXX_ELFS): $(BUILD)/bin/%: $(BUILD)/bin/%.o $(LIBC)/lib/libc.a $(CXX_LIBS)
+	$(LD) $(LDFLAGS) --eh-frame-hdr -o $@ $(CRT_BEGIN) $< $(CXX_LIBS) $(LIBS) $(CRT_END)
+	@$(call stamp-osabi,$@)
+
+$(BUILD)/%.o: %.cpp $(LIBC)/lib/libc.a $(CXX_LIBS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
 $(BUILD)/%.o: %.c $(LIBC)/lib/libc.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
@@ -107,8 +129,14 @@ $(BUILD)/%.o: %.c $(LIBC)/lib/libc.a
 # Optional packages (a window manager, ...) install a tree into
 # $(SYSROOT)/rootfs and it is overlaid onto the image as-is.
 OVERLAY := $(shell find $(SYSROOT)/rootfs -type f 2>/dev/null)
+# ... and EXTRA_ROOT, a tree for this one image only (the umbrella's
+# `make img GAME=...` puts a game there); the stamp notices a change of it.
+EXTRA_ROOT ?=
+EXTRA_FILES := $(if $(EXTRA_ROOT),$(shell find $(EXTRA_ROOT) -type f 2>/dev/null))
+EXTRA_STAMP := $(BUILD)/extra-root
+$(shell mkdir -p $(BUILD); [ "$$(cat $(EXTRA_STAMP) 2>/dev/null)" = "$(EXTRA_ROOT)" ] || echo "$(EXTRA_ROOT)" > $(EXTRA_STAMP))
 
-$(INITRD): $(ELFS) $(ROOTFS) ports $(wildcard $(SYSROOT)/lib/modules/*.ko) $(SYSROOT)/boot/sic.elf $(wildcard $(SYSROOT)/boot/zaeboot/*) $(OVERLAY)
+$(INITRD): $(ELFS) $(ROOTFS) ports $(wildcard $(SYSROOT)/lib/modules/*.ko) $(SYSROOT)/boot/sic.elf $(wildcard $(SYSROOT)/boot/zaeboot/*) $(OVERLAY) $(EXTRA_FILES) $(EXTRA_STAMP)
 	@rm -rf $(BUILD)/root && mkdir -p $(BUILD)/root/bin $(BUILD)/root/dev $(BUILD)/root/tmp
 	@cp -R rootfs/. $(BUILD)/root/
 	@cp $(ELFS) $(BUILD)/root/bin/
@@ -117,6 +145,7 @@ $(INITRD): $(ELFS) $(ROOTFS) ports $(wildcard $(SYSROOT)/lib/modules/*.ko) $(SYS
 	    { [ -d $(SYSROOT)/boot/zaeboot ] && cp -R $(SYSROOT)/boot/zaeboot $(BUILD)/root/boot/ || echo "note: no $(SYSROOT)/boot/zaeboot (run 'zig build sysroot' in zaeboot); sicinstall won't work"; }
 	@mkdir -p $(BUILD)/root/lib/modules && cp $(SYSROOT)/lib/modules/*.ko $(BUILD)/root/lib/modules/ 2>/dev/null || true
 	@[ ! -d $(SYSROOT)/rootfs ] || cp -R $(SYSROOT)/rootfs/. $(BUILD)/root/
+	@[ -z "$(EXTRA_ROOT)" ] || cp -R $(EXTRA_ROOT)/. $(BUILD)/root/
 	tar --format ustar -cf $@ -C $(BUILD)/root .
 
 clean:
