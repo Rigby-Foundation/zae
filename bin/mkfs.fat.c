@@ -42,7 +42,9 @@ int main(int argc, char **argv)
     bs[0] = 0xEB; bs[1] = 0x58; bs[2] = 0x90;
     memcpy(bs + 3, "SICFAT  ", 8);
     uint16_t bps = SS;
-    uint8_t spc = bits == 32 ? (total < 0x100000 ? 1 : 8) : (total < 0x10000 ? 4 : 32);
+    /* FAT32: the biggest clusters (up to 4 KiB) that still leave the 65525 it needs */
+    uint8_t spc = bits == 32 ? 8 : (total < 0x10000 ? 4 : 32);
+    while (bits == 32 && spc > 1 && total / spc < 70000) spc /= 2;
     uint16_t reserved = bits == 32 ? 32 : 4;
     uint8_t fats = 2;
     uint16_t root_entries = bits == 32 ? 0 : 512;

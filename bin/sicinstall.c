@@ -6,11 +6,17 @@
  *   LBA 0        MBR: zaeboot stage 1 + protective partition entry
  *   LBA 1..33    GPT header and entries
  *   LBA 34..     zaeboot stage 2 (BIOS), patched with the LBAs below
- *   p1  ESP      FAT32, 64 MiB: EFI/BOOT/BOOTX64.EFI, sic.elf, initrd.tar   (UEFI boots this)
- *   p2  sicboot  raw, 16 MiB: sic.elf then initrd.tar                        (BIOS stage 2 reads this)
+ *   p1  ESP      FAT32: EFI/BOOT/BOOTX64.EFI, sic.elf, initrd.tar           (UEFI boots this)
+ *   p2  sicboot  raw: sic.elf then initrd.tar                                (BIOS stage 2 reads this)
  *   p3  root     zaefs, the rest: a copy of the running root filesystem     (init mounts it on /disk)
+ * The first two are sized for the kernel and initrd being installed (a
+ * desktop with a game bundled makes a big initrd), with room to spare.
  *
  * usage: sicinstall [--yes] /dev/<disk>
+ *        sicinstall --update /dev/<disk> [kernel initrd]
+ * --update puts another kernel and initrd (default: the running ones) onto
+ * a disk installed before, into p1 and p2 and stage 2's table; the root
+ * filesystem stays as it is. For trying a new build without a USB stick.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,8 +33,9 @@
 #include <sys/random.h>
 
 #define ESP_START   2048ULL
-#define ESP_SECTORS (64ULL * 2048)          /* 64 MiB */
-#define BOOT_SECTORS (16ULL * 2048)         /* 16 MiB */
+#define MIB         2048ULL                 /* sectors */
+
+static uint64_t ESP_SECTORS, BOOT_SECTORS;  /* from the kernel and initrd, in main() */
 #define STAGE2_LBA  34ULL
 #define GPT_ENTRIES 128
 
@@ -143,7 +150,7 @@ static void copy_file(const char *src, const char *dst)
 /* Recursive copy of the live root filesystem, skipping runtime directories. */
 static void copy_tree(const char *src, const char *dst, int depth)
 {
-    static const char *const skip[] = { "/dev", "/proc", "/tmp", "/mnt", "/disk", "/sys", NULL };
+    static const char *const skip[] = { "/dev", "/proc", "/tmp", "/mnt", "/disk", "/sys", "/games", NULL };   /* games: in the initrd already */
     for (int i = 0; skip[i]; i++)
         if (strcmp(src, skip[i]) == 0) return;
     DIR *d = opendir(src);
@@ -236,25 +243,134 @@ static void write_tables(size_t stage2_sectors, uint64_t root_end)
     write_at(backup, hdr, 512);
 }
 
+/* Stage 2 with the sicboot partition's LBAs (kernel at `start`, the
+ * initrd right after it), written where the MBR points. */
+static void write_stage2(uint64_t start, uint32_t ksec, uint32_t isec, size_t *s2sec_out)
+{
+    size_t s2len;
+    uint8_t *stage2 = read_file("/boot/zaeboot/stage2.bin", &s2len);
+    uint8_t *tbl = memmem(stage2, s2len, "ZAEBIMG\0", 8);
+    for (uint8_t *p = tbl; p && !(p[8] == 0 && p[9] == 0 && p[10] == 0 && p[11] == 0);)
+        p = tbl = memmem(p + 1, s2len - (p + 1 - stage2), "ZAEBIMG\0", 8);
+    if (!tbl) { fprintf(stderr, "stage2.bin has no image table\n"); exit(1); }
+    uint32_t v[4] = { (uint32_t)start, ksec, (uint32_t)start + ksec, isec };
+    memcpy(tbl + 8, v, 16);
+    size_t s2sec = (s2len + 511) / 512;
+    if (STAGE2_LBA + s2sec > ESP_START) { fprintf(stderr, "stage2 too large\n"); exit(1); }
+    write_at(STAGE2_LBA, stage2, s2len);
+    free(stage2);
+    if (s2sec_out) *s2sec_out = s2sec;
+}
+
+/* sicboot: the kernel, then the initrd from its first whole sector, raw.
+ * Streamed: the initrd can be most of the memory. */
+static void write_sicboot(const char *p2, const char *kernel_path, const char *initrd_path, uint32_t ksec, size_t ilen)
+{
+    int bfd = open(p2, O_WRONLY);
+    if (bfd < 0) die(p2);
+    static char buf[256 * 1024];
+    const char *src[2] = { kernel_path, initrd_path };
+    for (int i = 0; i < 2; i++) {
+        if (i == 1 && lseek(bfd, (off_t)ksec * 512, SEEK_SET) < 0) die("lseek");
+        int fd = open(src[i], O_RDONLY);
+        if (fd < 0) die(src[i]);
+        ssize_t n;
+        size_t done = 0;
+        while ((n = read(fd, buf, sizeof buf)) > 0) {
+            if (write(bfd, buf, (size_t)n) != n) die(i ? "write initrd" : "write kernel");
+            done += (size_t)n;
+        }
+        close(fd);
+        if (i == 1 && done != ilen) { fprintf(stderr, "sicinstall: %s: short read\n", src[i]); exit(1); }
+    }
+    close(bfd);
+}
+
+/* First LBA and size (sectors) of GPT partition `index` (1-based). */
+static void gpt_part(int index, uint64_t *first, uint64_t *sectors)
+{
+    uint8_t e[128];
+    if (lseek(disk_fd, (off_t)(2 * 512 + (index - 1) * 128), SEEK_SET) < 0 || read(disk_fd, e, 128) != 128) die("read GPT");
+    uint64_t f = 0, l = 0;
+    for (int i = 7; i >= 0; i--) { f = f << 8 | e[32 + i]; l = l << 8 | e[40 + i]; }
+    if (!f || l < f) { fprintf(stderr, "sicinstall: %s: no partition %d; install first\n", disk_path, index); exit(1); }
+    *first = f; *sectors = l - f + 1;
+}
+
+static int update(const char *kernel_path, const char *initrd_path)
+{
+    struct stat ks, is;
+    if (stat(kernel_path, &ks) != 0) die(kernel_path);
+    if (stat(initrd_path, &is) != 0) die(initrd_path);
+    disk_fd = open(disk_path, O_RDWR);
+    if (disk_fd < 0) die(disk_path);
+    uint8_t hdr[8];
+    if (lseek(disk_fd, 512, SEEK_SET) < 0 || read(disk_fd, hdr, 8) != 8 || memcmp(hdr, "EFI PART", 8) != 0) {
+        fprintf(stderr, "sicinstall: %s has no GPT: not an installed disk\n", disk_path);
+        return 1;
+    }
+    uint64_t esp_first, esp_sectors, boot_first, boot_sectors;
+    gpt_part(1, &esp_first, &esp_sectors);
+    gpt_part(2, &boot_first, &boot_sectors);
+    uint32_t ksec = (uint32_t)((ks.st_size + 511) / 512), isec = (uint32_t)((is.st_size + 511) / 512);
+    if (ksec + isec > boot_sectors || (uint64_t)(ks.st_size + is.st_size) / 512 + 8 * MIB > esp_sectors) {
+        fprintf(stderr, "sicinstall: the new kernel and initrd (%llu MiB) do not fit the boot partitions (%llu MiB); reinstall\n",
+                (unsigned long long)((ks.st_size + is.st_size) >> 20), (unsigned long long)(boot_sectors / MIB));
+        return 1;
+    }
+    char p1[64], p2[64];
+    part_name(p1, 1); part_name(p2, 2);
+    printf("sicinstall: updating %s: kernel %lld KiB, initrd %lld MiB\n", disk_path, (long long)ks.st_size >> 10, (long long)is.st_size >> 20);
+    printf("  writing %s (BIOS boot)\n", p2);
+    write_sicboot(p2, kernel_path, initrd_path, ksec, (size_t)is.st_size);
+    write_stage2(boot_first, ksec, isec, NULL);            /* after the data it points at */
+    close(disk_fd);
+    printf("  writing the files on %s (UEFI boot)\n", p1);
+    mkdir("/mnt/esp", 0755);
+    if (mount(p1, "/mnt/esp", "fat", 0, NULL) != 0) die("mount ESP");
+    copy_file(kernel_path, "/mnt/esp/sic.elf");
+    copy_file(initrd_path, "/mnt/esp/initrd.tar");
+    if (umount("/mnt/esp") != 0) die("umount ESP");
+    sync();
+    printf("sicinstall: updated. Reboot to run it.\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    int yes = 0;
+    int yes = 0, upd = 0;
+    const char *files[2] = { "/boot/sic.elf", "/dev/initrd" };
+    int nfiles = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--yes") == 0) yes = 1;
-        else disk_path = argv[i];
+        else if (strcmp(argv[i], "--update") == 0) upd = 1;
+        else if (!disk_path) disk_path = argv[i];
+        else if (upd && nfiles < 2) files[nfiles++] = argv[i];
     }
-    if (!disk_path) {
-        fprintf(stderr, "usage: sicinstall [--yes] /dev/<disk>\n");
+    if (!disk_path || (upd && nfiles == 1)) {
+        fprintf(stderr, "usage: sicinstall [--yes] /dev/<disk>\n"
+                        "       sicinstall --update /dev/<disk> [kernel initrd]\n");
         return 2;
     }
+    if (upd) return update(files[0], files[1]);
     crc_init();
+    /* the boot partitions: the kernel and initrd, plus room for a bigger
+     * system later (FAT and the loader too, on the ESP) */
+    struct stat ks, is;
+    if (stat("/boot/sic.elf", &ks) != 0) die("/boot/sic.elf");
+    if (stat("/dev/initrd", &is) != 0) die("/dev/initrd");
+    uint64_t need = ((uint64_t)ks.st_size + (uint64_t)is.st_size + 511) / 512;
+    BOOT_SECTORS = (need + need / 4 + 16 * MIB) / MIB * MIB;
+    ESP_SECTORS = BOOT_SECTORS + 16 * MIB;
+    if (ESP_SECTORS < 64 * MIB) ESP_SECTORS = 64 * MIB;
     disk_fd = open(disk_path, O_RDWR);
     if (disk_fd < 0) die(disk_path);
     uint64_t bytes;
     if (ioctl(disk_fd, BLKGETSIZE64, &bytes) != 0) die("BLKGETSIZE64 (is this a whole disk?)");
     total_sectors = bytes / 512;
-    if (total_sectors < ESP_START + ESP_SECTORS + BOOT_SECTORS + 2048 + 34) {
-        fprintf(stderr, "sicinstall: %s is too small (%llu MiB); need at least 100 MiB\n", disk_path, (unsigned long long)(bytes >> 20));
+    if (total_sectors < ESP_START + ESP_SECTORS + BOOT_SECTORS + 64 * MIB + 34) {
+        fprintf(stderr, "sicinstall: %s is too small (%llu MiB); need at least %llu MiB\n", disk_path, (unsigned long long)(bytes >> 20),
+                (unsigned long long)((ESP_START + ESP_SECTORS + BOOT_SECTORS + 64 * MIB + 34) / MIB));
         return 1;
     }
 
@@ -267,23 +383,11 @@ int main(int argc, char **argv)
     }
 
     /* 1. stage 2 with the sicboot partition's LBAs, then the partition tables */
-    size_t s2len, klen, ilen;
-    uint8_t *stage2 = read_file("/boot/zaeboot/stage2.bin", &s2len);
-    uint8_t *kernel = read_file("/boot/sic.elf", &klen);
-    uint8_t *initrd = read_file("/dev/initrd", &ilen);
+    size_t s2sec, ilen = (size_t)is.st_size;
     uint64_t boot_start = ESP_START + ESP_SECTORS;
-    uint32_t ksec = (uint32_t)((klen + 511) / 512), isec = (uint32_t)((ilen + 511) / 512);
-    if ((uint64_t)ksec + isec > BOOT_SECTORS) { fprintf(stderr, "kernel + initrd exceed the 16 MiB boot partition\n"); return 1; }
-    uint8_t *tbl = memmem(stage2, s2len, "ZAEBIMG\0", 8);
-    for (uint8_t *p = tbl; p && !(p[8] == 0 && p[9] == 0 && p[10] == 0 && p[11] == 0);)
-        p = tbl = memmem(p + 1, s2len - (p + 1 - stage2), "ZAEBIMG\0", 8);
-    if (!tbl) { fprintf(stderr, "stage2.bin has no image table\n"); return 1; }
-    uint32_t v[4] = { (uint32_t)boot_start, ksec, (uint32_t)boot_start + ksec, isec };
-    memcpy(tbl + 8, v, 16);
-    size_t s2sec = (s2len + 511) / 512;
-    if (STAGE2_LBA + s2sec > ESP_START) { fprintf(stderr, "stage2 too large\n"); return 1; }
+    uint32_t ksec = (uint32_t)((ks.st_size + 511) / 512), isec = (uint32_t)((ilen + 511) / 512);
     printf("  writing partition tables and BIOS stages\n");
-    write_at(STAGE2_LBA, stage2, s2len);
+    write_stage2(boot_start, ksec, isec, &s2sec);
     write_tables(s2sec, total_sectors - 34);
     if (ioctl(disk_fd, BLKRRPART, 0) != 0) die("BLKRRPART");
     close(disk_fd);
@@ -293,12 +397,7 @@ int main(int argc, char **argv)
 
     /* 2. sicboot: kernel then initrd, raw */
     printf("  writing %s (kernel + initrd for BIOS boot)\n", p2);
-    int bfd = open(p2, O_WRONLY);
-    if (bfd < 0) die(p2);
-    if (write(bfd, kernel, klen) != (ssize_t)klen) die("write kernel");
-    if (lseek(bfd, (off_t)ksec * 512, SEEK_SET) < 0) die("lseek");
-    if (write(bfd, initrd, ilen) != (ssize_t)ilen) die("write initrd");
-    close(bfd);
+    write_sicboot(p2, "/boot/sic.elf", "/dev/initrd", ksec, ilen);
 
     /* 3. ESP */
     printf("  formatting %s as FAT32 and installing the UEFI loader\n", p1);
