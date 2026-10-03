@@ -89,6 +89,22 @@ int main(void)
         }
     }
 
+    /* If the Adreno GPU is present, run adreno test at startup */
+    if (access("/bin/adrenotest", X_OK) == 0 && access("/dev/adrenogpu", F_OK) == 0) {
+        printf("init: starting adreno...\n");
+        fflush(stdout);
+        pid_t ap = fork();
+        if (ap == 0) {
+            execl("/bin/adrenotest", "adrenotest", (char *)NULL);
+            _exit(1);
+        }
+        if (ap > 0) {
+            int st;
+            waitpid(ap, &st, 0);
+        }
+        sleep(1);
+    }
+
     char session[128] = "/bin/sh";
     FILE *sf = fopen("/etc/session", "r");
     if (sf) {
