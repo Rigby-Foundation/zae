@@ -59,6 +59,15 @@ int main(void)
             printf("init: no zaefs volume found; nothing mounted on /disk\n");
     }
 
+    /* A phone's Data partition, once its recovery formatted it as ext4, on
+     * /mnt/data (games there show up in the launchpad); Android's own
+     * (f2fs) is not ext4 and stays as it is. */
+    if (access("/dev/by-name/userdata", F_OK) == 0) {
+        mkdir("/mnt", 0755); mkdir("/mnt/data", 0755);
+        if (mount("/dev/by-name/userdata", "/mnt/data", "ext4", 0, NULL) == 0) printf("init: mounted userdata (ext4) on /mnt/data\n");
+        else rmdir("/mnt/data");
+    }
+
     /* Networking: lease an address on the first Ethernet interface, in the
      * background so a cable-less machine doesn't hold the shell up. */
     if (access("/bin/dhcp", X_OK) == 0) {

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/syscall.h>
 
@@ -13,6 +14,8 @@ int main(int argc, char **argv)
 {
     const char *name = strrchr(argv[0], '/');
     name = name ? name + 1 : argv[0];
+    if (!(argc > 2 && strcmp(argv[1], "-n") == 0))
+        umount("/mnt/data");                    /* a phone's ext4 Data: left clean */
     sync();
     if (strcmp(name, "poweroff") == 0) reboot(RB_POWER_OFF);
     else if (argc > 2 && strcmp(argv[1], "-n") == 0) {
