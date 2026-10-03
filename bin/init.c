@@ -68,6 +68,19 @@ int main(void)
         else rmdir("/mnt/data");
     }
 
+    /* The modem partition (FAT: the modem's and the WLAN's firmware, which
+     * /dev/mss loads from /mnt/modem/image), never written to. */
+    {
+        static const char *const names[] = { "/dev/by-name/modem_a", "/dev/by-name/modem", "/dev/by-name/modem_b" };
+        for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+            if (access(names[i], F_OK) != 0) continue;
+            mkdir("/mnt", 0755); mkdir("/mnt/modem", 0755);
+            if (mount(names[i], "/mnt/modem", "fat", MS_RDONLY, NULL) == 0) printf("init: mounted %s on /mnt/modem\n", names[i] + 13);
+            else rmdir("/mnt/modem");
+            break;
+        }
+    }
+
     /* Networking: lease an address on the first Ethernet interface, in the
      * background so a cable-less machine doesn't hold the shell up. */
     if (access("/bin/dhcp", X_OK) == 0) {
