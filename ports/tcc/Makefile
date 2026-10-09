@@ -12,6 +12,8 @@
 #
 # tcc itself is cross-built with clang against the sic musl from the sysroot,
 # exactly like every other ZAE program. libtcc1.a is compiled with clang too.
+# ARCH=x86_64 (build/, build/root) or ARCH=aarch64 (build/aarch64,
+# build/root-aarch64): tcc generates code for the machine it runs on.
 
 TCC_URL := https://github.com/TinyCC/tinycc/archive/refs/heads/mob.tar.gz
 
@@ -31,21 +33,35 @@ STRIP  ?= $(LLVM_PREFIX)/bin/llvm-strip
 
 SYSROOT ?= $(if $(SIC_SYSROOT),$(SIC_SYSROOT),$(HOME)/.sic/sysroot)
 LIBC  := $(SYSROOT)/usr
+ARCH  ?= x86_64
 SRC   := src
-BUILD := build
-ROOT  := $(BUILD)/root
 PATCHES := $(wildcard patches/*.patch)
 
-CFLAGS  := --target=x86_64-linux-musl -std=gnu11 -nostdinc -isystem $(LIBC)/include \
+ifeq ($(ARCH),aarch64)
+TARGET   := aarch64-linux-musl
+TCC_ARCH := ARM64
+LD_EMUL  := -m aarch64elf
+BUILD    := build/aarch64
+ROOT     := build/root-aarch64
+LIBTCC1_SRC := lib-arm64.c stdatomic.c atomic.S builtin.c alloca.S alloca-bt.S armflush.c dsohandle.c
+else
+TARGET   := x86_64-linux-musl
+TCC_ARCH := X86_64
+LD_EMUL  :=
+BUILD    := build
+ROOT     := build/root
+LIBTCC1_SRC := libtcc1.c stdatomic.c atomic.S builtin.c alloca.S alloca-bt.S va_list.c dsohandle.c
+endif
+
+CFLAGS  := --target=$(TARGET) -std=gnu11 -nostdinc -isystem $(LIBC)/include \
            -fPIE -fno-stack-protector -fno-asynchronous-unwind-tables -O2 -g0 \
            -Wno-everything -D_GNU_SOURCE
-LDFLAGS := -static -nostdlib --image-base=0x8000000000 -z max-page-size=0x1000 -z noexecstack \
+LDFLAGS := $(LD_EMUL) -static -nostdlib --image-base=0x8000000000 -z max-page-size=0x1000 -z noexecstack \
            --defsym=_DYNAMIC=0x8000000000
 CRT_BEGIN := $(LIBC)/lib/crt1.o $(LIBC)/lib/crti.o
 CRT_END   := $(LIBC)/lib/crtn.o
 OSABI_SIC := \123
 
-LIBTCC1_SRC := libtcc1.c stdatomic.c atomic.S builtin.c alloca.S alloca-bt.S va_list.c dsohandle.c
 LIBTCC1_OBJ := $(patsubst %,$(BUILD)/lib/%.o,$(LIBTCC1_SRC))
 
 .PHONY: all fetch port clean distclean
@@ -76,7 +92,7 @@ $(BUILD)/config.h: Makefile
 	@mkdir -p $(BUILD)
 	@{ echo '#define TCC_VERSION "0.9.28rc"'; \
 	   echo '#define TCC_GITHASH "sic"'; \
-	   echo '#define TCC_TARGET_X86_64 1'; \
+	   echo '#define TCC_TARGET_$(TCC_ARCH) 1'; \
 	   echo '#define TARGETOS_sic 1'; \
 	   echo '#define CONFIG_TCC_PREDEFS 1'; \
 	   echo '#define CONFIG_TCC_STATIC 1'; \
@@ -85,8 +101,8 @@ $(BUILD)/config.h: Makefile
 	   echo '#define CONFIG_TCC_SEMLOCK 0'; \
 	   echo '#define CONFIG_TCCDIR "/usr/lib/tcc"'; \
 	   echo '#define CONFIG_SYSROOT ""'; \
-	   echo '#define CONFIG_TCC_SYSINCLUDEPATHS "{B}/include:/usr/include"'; \
-	   echo '#define CONFIG_TCC_LIBPATHS "{B}:/usr/lib"'; \
+	   echo '#define CONFIG_TCC_SYSINCLUDEPATHS "{B}/include:/usr/local/include:/usr/include"'; \
+	   echo '#define CONFIG_TCC_LIBPATHS "{B}:/usr/local/lib:/usr/lib"'; \
 	   echo '#define CONFIG_TCC_CRTPREFIX "/usr/lib"'; \
 	   echo '#define CONFIG_TCC_ELFINTERP "/nonexistent"'; \
 	} > $@
@@ -96,12 +112,19 @@ $(BUILD)/tcc.o: $(SRC)/tcc.c $(BUILD)/config.h $(BUILD)/tccdefs_.h $(SRC)/.sic-p
 
 $(ROOT)/bin/tcc: $(BUILD)/tcc.o
 	@mkdir -p $(dir $@)
-	$(LD) $(LDFLAGS) -o $@ $(CRT_BEGIN) $< $(LIBC)/lib/libc.a $(CRT_END)
+	$(LD) $(LDFLAGS) -o $@ $(CRT_BEGIN) $< $(LIBC)/lib/libc.a $(wildcard $(LIBC)/lib/libcompiler_rt.a) $(CRT_END)
 	@printf '$(OSABI_SIC)' | dd of=$@ bs=1 seek=7 count=1 conv=notrunc status=none
+	@# the names build systems look for: cc and c99 are tcc, ar is tcc -ar, ld is tcc too, ranlib has nothing to do
+	@mkdir -p $(ROOT)/usr/bin
+	@ln -sf /bin/tcc $(ROOT)/usr/bin/cc
+	@ln -sf /bin/tcc $(ROOT)/usr/bin/c99
+	@printf '#!/bin/sh\n# ar: tcc has one\nexec tcc -ar "$$@"\n' > $(ROOT)/usr/bin/ar && chmod +x $(ROOT)/usr/bin/ar
+	@printf '#!/bin/sh\n# ranlib: tcc -ar writes the symbol index already\nexit 0\n' > $(ROOT)/usr/bin/ranlib && chmod +x $(ROOT)/usr/bin/ranlib
+	@printf '#!/bin/sh\n# ld: tcc is the linker too (configure scripts look for one)\ncase "$$1" in -v|-V|--version) echo "tcc linker (sic)"; exit 0;; esac\nexec tcc -nostdlib "$$@"\n' > $(ROOT)/usr/bin/ld && chmod +x $(ROOT)/usr/bin/ld
 
 $(BUILD)/lib/%.o: $(SRC)/lib/% $(SRC)/.sic-port $(BUILD)/config.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -DTCC_TARGET_X86_64 -I$(BUILD) -I$(SRC) -I$(SRC)/include -c $< -o $@
+	$(CC) $(CFLAGS) -DTCC_TARGET_$(TCC_ARCH) -I$(BUILD) -I$(SRC) -I$(SRC)/include -c $< -o $@
 
 $(ROOT)/usr/lib/tcc/libtcc1.a: $(LIBTCC1_OBJ)
 	@mkdir -p $(dir $@)
@@ -121,7 +144,7 @@ $(ROOT)/usr/include/stdio.h: $(LIBC)/lib/libc.a
 	$(STRIP) -g -o $(ROOT)/usr/lib/libc.a $(LIBC)/lib/libc.a
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf $(BUILD) $(ROOT)
 
 distclean: clean
 	rm -rf $(SRC)

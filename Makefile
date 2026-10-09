@@ -41,7 +41,7 @@ TARGET     := aarch64-linux-musl
 ARCH_CFLAGS := -fPIE
 IMAGE_BASE := 0x8000000000
 LD_EMUL    := -m aarch64elf
-PORTS_SKIP := tcc doom        # tcc generates x86; doom's framebuffer path is x86 too
+PORTS_SKIP := doom            # doom's framebuffer path is x86
 else
 TARGET     := x86_64-linux-musl
 ARCH_CFLAGS := -fPIE
@@ -66,6 +66,9 @@ LIBS      := $(LIBC)/lib/libc.a $(wildcard $(LIBC)/lib/libcompiler_rt.a)   # the
 
 PROGS   := $(patsubst bin/%.c,%,$(wildcard bin/*.c))
 ELFS    := $(patsubst %,$(BUILD)/bin/%,$(PROGS))
+# Programs of several files: bin/<name>/*.c -> /bin/<name>
+DIR_PROGS := $(patsubst bin/%/,%,$(sort $(dir $(wildcard bin/*/*.c))))
+ELFS    += $(patsubst %,$(BUILD)/bin/%,$(DIR_PROGS))
 
 # C++ programs (bin/*.cpp) use libc++ from ports/libcxx, installed into the
 # sysroot before they build; --eh-frame-hdr is how libunwind finds the
@@ -107,6 +110,17 @@ $(BUILD)/bin/%: $(BUILD)/bin/%.o $(LIBC)/lib/libc.a
 	$(LD) $(LDFLAGS) -o $@ $(CRT_BEGIN) $< $(LIBS) $(CRT_END)
 	@$(call stamp-osabi,$@)
 
+# their objects live apart (build/<arch>/dirobj/<name>/): bin/<name> is the program itself
+define dir_prog
+$$(BUILD)/bin/$(1): $$(patsubst bin/$(1)/%.c,$$(BUILD)/dirobj/$(1)/%.o,$$(wildcard bin/$(1)/*.c)) $$(LIBC)/lib/libc.a
+	$$(LD) $$(LDFLAGS) -o $$@ $$(CRT_BEGIN) $$(filter %.o,$$^) $$(LIBS) $$(CRT_END)
+	@$$(call stamp-osabi,$$@)
+$$(BUILD)/dirobj/$(1)/%.o: bin/$(1)/%.c $$(wildcard bin/$(1)/*.h) $$(LIBC)/lib/libc.a
+	@mkdir -p $$(dir $$@)
+	$$(CC) $$(CFLAGS) -MMD -MP -c $$< -o $$@
+endef
+$(foreach p,$(DIR_PROGS),$(eval $(call dir_prog,$(p))))
+
 $(CXX_LIBS):
 	$(MAKE) -C ports/libcxx install
 
@@ -122,7 +136,7 @@ $(BUILD)/%.o: %.c $(LIBC)/lib/libc.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
--include $(patsubst %,$(BUILD)/bin/%.d,$(PROGS))
+-include $(patsubst %,$(BUILD)/bin/%.d,$(PROGS)) $(patsubst bin/%.c,$(BUILD)/dirobj/%.d,$(wildcard bin/*/*.c))
 
 # Layout: /bin/<prog> plus everything under rootfs/ (etc/motd, ...); /dev and
 # /tmp exist so the kernel can populate them.
@@ -134,14 +148,18 @@ OVERLAY := $(shell find $(SYSROOT)/rootfs -type f 2>/dev/null)
 EXTRA_ROOT ?=
 EXTRA_FILES := $(if $(EXTRA_ROOT),$(shell find $(EXTRA_ROOT) -type f 2>/dev/null))
 EXTRA_STAMP := $(BUILD)/extra-root
-$(shell mkdir -p $(BUILD); [ "$$(cat $(EXTRA_STAMP) 2>/dev/null)" = "$(EXTRA_ROOT)" ] || echo "$(EXTRA_ROOT)" > $(EXTRA_STAMP))
+$(shell mkdir -p $(BUILD); [ -f $(EXTRA_STAMP) ] && [ "$$(cat $(EXTRA_STAMP))" = "$(EXTRA_ROOT)" ] || echo "$(EXTRA_ROOT)" > $(EXTRA_STAMP))
 
-$(INITRD): $(ELFS) $(ROOTFS) ports $(wildcard $(SYSROOT)/lib/modules/*.ko) $(SYSROOT)/boot/sic.elf $(wildcard $(SYSROOT)/boot/zaeboot/*) $(OVERLAY) $(EXTRA_FILES) $(EXTRA_STAMP)
+$(INITRD): $(ELFS) $(ROOTFS) ports $(wildcard $(SYSROOT)/lib/modules/*.ko) $(SYSROOT)/boot/sic.elf $(wildcard $(SYSROOT)/boot/sic.img) $(wildcard $(SYSROOT)/boot/zaeboot/*) $(OVERLAY) $(EXTRA_FILES) $(EXTRA_STAMP)
 	@rm -rf $(BUILD)/root && mkdir -p $(BUILD)/root/bin $(BUILD)/root/dev $(BUILD)/root/tmp
 	@cp -R rootfs/. $(BUILD)/root/
+	@# configure scripts read this (init exports CONFIG_SITE): config.guess does not know sic; what is
+	@# built here is built against musl with a Linux-like interface, so that is the system type
+	@printf '# autoconf site defaults for sic (CONFIG_SITE)\nac_cv_build=$${ac_cv_build-$(ARCH)-unknown-linux-musl}\n' > $(BUILD)/root/etc/config.site
 	@cp $(ELFS) $(BUILD)/root/bin/
 	@for p in $(PORTS); do r=ports/$$p/build/root$(ARCH_SUFFIX); [ -d $$r ] || r=ports/$$p/build/root; [ ! -d $$r ] || cp -R $$r/. $(BUILD)/root/; done
 	@mkdir -p $(BUILD)/root/boot && cp $(SYSROOT)/boot/sic.elf $(BUILD)/root/boot/ && \
+	    { [ ! -f $(SYSROOT)/boot/sic.img ] || cp $(SYSROOT)/boot/sic.img $(BUILD)/root/boot/; } && \
 	    { [ -d $(SYSROOT)/boot/zaeboot ] && cp -R $(SYSROOT)/boot/zaeboot $(BUILD)/root/boot/ || echo "note: no $(SYSROOT)/boot/zaeboot (run 'zig build sysroot' in zaeboot); sicinstall won't work"; }
 	@mkdir -p $(BUILD)/root/lib/modules && cp $(SYSROOT)/lib/modules/*.ko $(BUILD)/root/lib/modules/ 2>/dev/null || true
 	@[ ! -d $(SYSROOT)/rootfs ] || cp -R $(SYSROOT)/rootfs/. $(BUILD)/root/
