@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Copyright (C) 2026 Rigby Foundation */
-/* sicinstall: put sic on a disk so it boots on both UEFI and legacy BIOS.
+/* sicinstall: put sic on a disk so it boots on both UEFI and legacy BIOS
+ * (a PC), or from UEFI (arm64: BOOTAA64.EFI and sic.img on the ESP; p2 and
+ * the BIOS stages stay unused there).
  *
  * Layout (GPT with a protective MBR that carries the BIOS stage 1):
  *   LBA 0        MBR: zaeboot stage 1 + protective partition entry
@@ -42,6 +44,29 @@ static uint64_t ESP_SECTORS, BOOT_SECTORS;  /* from the kernel and initrd, in ma
 static const char *disk_path;
 static int disk_fd;
 static uint64_t total_sectors;
+
+/* What gets installed where: a PC boots zaeboot from BIOS (stages in the
+ * MBR gap and a raw partition) or UEFI; an arm64 machine from UEFI only. */
+#if defined(__x86_64__)
+#define KERNEL_FILE "/boot/sic.elf"
+#define ESP_KERNEL  "/mnt/esp/sic.elf"
+#define LOADER      "/boot/zaeboot/BOOTX64.EFI"
+#define ESP_LOADER  "/mnt/esp/EFI/BOOT/BOOTX64.EFI"
+#define BIOS        1
+#elif defined(__aarch64__)
+#define KERNEL_FILE "/boot/sic.img"
+#define ESP_KERNEL  "/mnt/esp/sic.img"
+#define LOADER      "/boot/zaeboot/BOOTAA64.EFI"
+#define ESP_LOADER  "/mnt/esp/EFI/BOOT/BOOTAA64.EFI"
+#define BIOS        0
+#else
+#define NO_INSTALL  1               /* OpenFirmware boots the PowerPC image itself */
+#define KERNEL_FILE "/boot/sic.elf"
+#define ESP_KERNEL  "/mnt/esp/sic.elf"
+#define LOADER      ""
+#define ESP_LOADER  ""
+#define BIOS        0
+#endif
 
 static void die(const char *what)
 {
@@ -178,10 +203,14 @@ static void copy_tree(const char *src, const char *dst, int depth)
 static void write_tables(size_t stage2_sectors, uint64_t root_end)
 {
     uint8_t mbr[512];
-    size_t s1len;
-    uint8_t *stage1 = read_file("/boot/zaeboot/stage1.bin", &s1len);
-    if (s1len != 512) { fprintf(stderr, "stage1.bin is not 512 bytes\n"); exit(1); }
-    memcpy(mbr, stage1, 446);
+    memset(mbr, 0, sizeof mbr);
+    if (BIOS) {                                 /* the BIOS stage 1 in the boot code area */
+        size_t s1len;
+        uint8_t *stage1 = read_file("/boot/zaeboot/stage1.bin", &s1len);
+        if (s1len != 512) { fprintf(stderr, "stage1.bin is not 512 bytes\n"); exit(1); }
+        memcpy(mbr, stage1, 446);
+        free(stage1);
+    }
     memset(mbr + 446, 0, 64);
     uint32_t lba32 = (uint32_t)STAGE2_LBA;
     uint16_t cnt16 = (uint16_t)stage2_sectors;
@@ -321,14 +350,17 @@ static int update(const char *kernel_path, const char *initrd_path)
     char p1[64], p2[64];
     part_name(p1, 1); part_name(p2, 2);
     printf("sicinstall: updating %s: kernel %lld KiB, initrd %lld MiB\n", disk_path, (long long)ks.st_size >> 10, (long long)is.st_size >> 20);
-    printf("  writing %s (BIOS boot)\n", p2);
-    write_sicboot(p2, kernel_path, initrd_path, ksec, (size_t)is.st_size);
-    write_stage2(boot_first, ksec, isec, NULL);            /* after the data it points at */
+    if (BIOS) {
+        printf("  writing %s (BIOS boot)\n", p2);
+        write_sicboot(p2, kernel_path, initrd_path, ksec, (size_t)is.st_size);
+        write_stage2(boot_first, ksec, isec, NULL);        /* after the data it points at */
+    }
     close(disk_fd);
     printf("  writing the files on %s (UEFI boot)\n", p1);
     mkdir("/mnt/esp", 0755);
     if (mount(p1, "/mnt/esp", "fat", 0, NULL) != 0) die("mount ESP");
-    copy_file(kernel_path, "/mnt/esp/sic.elf");
+    copy_file(LOADER, ESP_LOADER);                          /* the loader too: it may have changed */
+    copy_file(kernel_path, ESP_KERNEL);
     copy_file(initrd_path, "/mnt/esp/initrd.tar");
     if (umount("/mnt/esp") != 0) die("umount ESP");
     sync();
@@ -339,7 +371,7 @@ static int update(const char *kernel_path, const char *initrd_path)
 int main(int argc, char **argv)
 {
     int yes = 0, upd = 0;
-    const char *files[2] = { "/boot/sic.elf", "/dev/initrd" };
+    const char *files[2] = { KERNEL_FILE, "/dev/initrd" };
     int nfiles = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--yes") == 0) yes = 1;
@@ -352,12 +384,28 @@ int main(int argc, char **argv)
                         "       sicinstall --update /dev/<disk> [kernel initrd]\n");
         return 2;
     }
+#ifdef NO_INSTALL
+    fprintf(stderr, "sicinstall: this machine's firmware boots sic by itself: nothing to install (a disk is for data: mkfs.zaefs)\n");
+    return 1;
+#endif
+    /* everything it will copy, before anything is erased */
+    static const char *const needed[] = { LOADER, KERNEL_FILE,
+#if BIOS
+        "/boot/zaeboot/stage1.bin", "/boot/zaeboot/stage2.bin",
+#endif
+        NULL };
+    for (int i = 0; needed[i]; i++)
+        if (access(needed[i], R_OK) != 0) {
+            fprintf(stderr, "sicinstall: %s: %s (the image was built without zaeboot: 'zig build sysroot' in zaeboot, then the userland again)\n",
+                    needed[i], strerror(errno));
+            return 1;
+        }
     if (upd) return update(files[0], files[1]);
     crc_init();
     /* the boot partitions: the kernel and initrd, plus room for a bigger
      * system later (FAT and the loader too, on the ESP) */
     struct stat ks, is;
-    if (stat("/boot/sic.elf", &ks) != 0) die("/boot/sic.elf");
+    if (stat(KERNEL_FILE, &ks) != 0) die(KERNEL_FILE);
     if (stat("/dev/initrd", &is) != 0) die("/dev/initrd");
     uint64_t need = ((uint64_t)ks.st_size + (uint64_t)is.st_size + 511) / 512;
     BOOT_SECTORS = (need + need / 4 + 16 * MIB) / MIB * MIB;
@@ -386,8 +434,9 @@ int main(int argc, char **argv)
     size_t s2sec, ilen = (size_t)is.st_size;
     uint64_t boot_start = ESP_START + ESP_SECTORS;
     uint32_t ksec = (uint32_t)((ks.st_size + 511) / 512), isec = (uint32_t)((ilen + 511) / 512);
-    printf("  writing partition tables and BIOS stages\n");
-    write_stage2(boot_start, ksec, isec, &s2sec);
+    printf(BIOS ? "  writing partition tables and BIOS stages\n" : "  writing partition tables\n");
+    s2sec = 0;
+    if (BIOS) write_stage2(boot_start, ksec, isec, &s2sec);
     write_tables(s2sec, total_sectors - 34);
     if (ioctl(disk_fd, BLKRRPART, 0) != 0) die("BLKRRPART");
     close(disk_fd);
@@ -395,9 +444,11 @@ int main(int argc, char **argv)
     char p1[64], p2[64], p3[64];
     part_name(p1, 1); part_name(p2, 2); part_name(p3, 3);
 
-    /* 2. sicboot: kernel then initrd, raw */
-    printf("  writing %s (kernel + initrd for BIOS boot)\n", p2);
-    write_sicboot(p2, "/boot/sic.elf", "/dev/initrd", ksec, ilen);
+    /* 2. sicboot: kernel then initrd, raw (what the BIOS stages load) */
+    if (BIOS) {
+        printf("  writing %s (kernel + initrd for BIOS boot)\n", p2);
+        write_sicboot(p2, KERNEL_FILE, "/dev/initrd", ksec, ilen);
+    }
 
     /* 3. ESP */
     printf("  formatting %s as FAT32 and installing the UEFI loader\n", p1);
@@ -407,8 +458,8 @@ int main(int argc, char **argv)
     if (mount(p1, "/mnt/esp", "fat", 0, NULL) != 0) die("mount ESP");
     mkdir("/mnt/esp/EFI", 0755);
     mkdir("/mnt/esp/EFI/BOOT", 0755);
-    copy_file("/boot/zaeboot/BOOTX64.EFI", "/mnt/esp/EFI/BOOT/BOOTX64.EFI");
-    copy_file("/boot/sic.elf", "/mnt/esp/sic.elf");
+    copy_file(LOADER, ESP_LOADER);
+    copy_file(KERNEL_FILE, ESP_KERNEL);
     copy_file("/dev/initrd", "/mnt/esp/initrd.tar");
     if (umount("/mnt/esp") != 0) die("umount ESP");
 
@@ -421,6 +472,6 @@ int main(int argc, char **argv)
     copy_tree("/", "/mnt/root", 0);
     if (umount("/mnt/root") != 0) die("umount root");
 
-    printf("sicinstall: done. Reboot and boot from %s (UEFI or BIOS).\n", disk_path);
+    printf("sicinstall: done. Reboot and boot from %s (%s).\n", disk_path, BIOS ? "UEFI or BIOS" : "UEFI");
     return 0;
 }
