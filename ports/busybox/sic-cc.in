@@ -1,0 +1,15 @@
+#!/bin/sh
+# sic-cc: clang for sic (@TARGET@) against the sysroot's musl; links static
+# executables the way ZAE does (its crt files, libc.a, compiler-rt, lld).
+LIBC=@LIBC@
+link=1
+for a in "$@"; do case "$a" in -c|-S|-E|-M|-MM) link=0;; -r) link=r;; esac; done
+if [ $link = 0 ]; then
+    exec @CLANG@ --target=@TARGET@ -nostdinc -isystem $LIBC/include -fPIE -fno-stack-protector "$@"
+fi
+if [ $link = r ]; then          # a partial link (built-in.o): no start files, no libraries
+    exec @CLANG@ --target=@TARGET@ -fuse-ld=@LLD@ -nostdlib "$@"
+fi
+exec @CLANG@ --target=@TARGET@ -nostdinc -isystem $LIBC/include -fPIE -fno-stack-protector \
+    -fuse-ld=@LLD@ -nostdlib -static -L$(dirname "$0")/lib -Wl,--image-base=0x8000000000 -Wl,-z,max-page-size=0x1000 -Wl,--defsym=_DYNAMIC=0x8000000000 \
+    $LIBC/lib/crt1.o $LIBC/lib/crti.o "$@" $LIBC/lib/libc.a $LIBC/lib/libcompiler_rt.a $LIBC/lib/crtn.o

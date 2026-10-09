@@ -23,8 +23,9 @@ int main(void)
             fputs(line, stdout);
         fclose(f);
     }
-    setenv("PATH", "/bin", 1);
+    setenv("PATH", "/usr/bin:/bin", 1);       /* ports' commands (BusyBox's applets) first, then ZAE's */
     setenv("HOME", "/", 1);
+    setenv("CONFIG_SITE", "/etc/config.site", 1);   /* what autoconf's configure scripts should assume here */
 
     /* Persistent storage: the first zaefs volume found goes on /disk (an
      * installed system's root partition, or a whole disk used as scratch);
@@ -57,6 +58,25 @@ int main(void)
         if (d) closedir(d);
         if (!mounted)
             printf("init: no zaefs volume found; nothing mounted on /disk\n");
+    }
+
+    /* What is installed and made here lives on the disk: /usr/local (the
+     * prefix configure scripts install to), /home and /root point there, and
+     * /usr/local/bin comes first in PATH. The system itself is the image the
+     * disk's boot partition (or QEMU) loaded; sicinstall --update renews it. */
+    {
+        struct stat root_st, disk_st;
+        if (stat("/", &root_st) == 0 && stat("/disk", &disk_st) == 0 && disk_st.st_dev != root_st.st_dev) {
+            static const char *const dirs[] = { "/disk/usr", "/disk/usr/local", "/disk/usr/local/bin", "/disk/usr/local/lib",
+                                                "/disk/usr/local/include", "/disk/usr/local/share", "/disk/home", "/disk/root", NULL };
+            for (int i = 0; dirs[i]; i++) mkdir(dirs[i], 0755);
+            symlink("/disk/usr/local", "/usr/local");
+            symlink("/disk/home", "/home");
+            symlink("/disk/root", "/root");
+            setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
+            setenv("HOME", "/root", 1);
+            printf("init: /usr/local, /home and /root are on the disk\n");
+        }
     }
 
     /* A phone's Data partition, once its recovery formatted it as ext4, on

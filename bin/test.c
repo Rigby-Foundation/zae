@@ -30,6 +30,40 @@ static void segv(int sig, siginfo_t *si, void *uc) { (void)uc; _exit(si->si_addr
 
 static __thread int tls_var = 5;
 
+/* A disk the disk tests may use: one that mounts with `fs` already, or a
+ * blank one (no partitions, only zeros in its first MiB), formatted here.
+ * Anything else (an installed system, someone's data) is left alone: a
+ * test that formats whatever does not mount once wiped an installed VM. */
+static int disk_ready(const char *dev, const char *where, const char *fs)
+{
+    if (mount(dev, where, fs, 0, NULL) == 0 || errno == EBUSY) return 1;
+    char part[64];
+    snprintf(part, sizeof part, "%sp1", dev);
+    int blank = access(part, F_OK) != 0;
+    int fd = open(dev, O_RDONLY);
+    static unsigned char buf[65536];
+    for (int k = 0; blank && fd >= 0 && k < 16; k++) {
+        if (read(fd, buf, sizeof buf) != (ssize_t)sizeof buf) { blank = 0; break; }
+        for (size_t i = 0; i < sizeof buf; i++) if (buf[i]) { blank = 0; break; }
+    }
+    if (fd >= 0) close(fd);
+    if (fd < 0 || !blank) {
+        printf("[test] %s holds something that is not %s (an installed system? data?): not formatting it, skipping its test\n", dev, fs);
+        return 0;
+    }
+    int status;
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (!strcmp(fs, "zaefs")) execl("/bin/mkfs.zaefs", "mkfs.zaefs", "-L", "sicdisk", dev, (char *)NULL);
+        else execl("/bin/mkfs.fat", "mkfs.fat", "-n", "SICFAT", dev, (char *)NULL);
+        _exit(127);
+    }
+    waitpid(pid, &status, 0);
+    CHECK(WEXITSTATUS(status) == 0, !strcmp(fs, "zaefs") ? "mkfs.zaefs" : "mkfs.fat");
+    CHECK(mount(dev, where, fs, 0, NULL) == 0, "mount a freshly formatted disk");
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     printf("[test] pid %d starting, argv[0]=%s\n", getpid(), argv[0]);
@@ -37,7 +71,7 @@ int main(int argc, char **argv)
     CHECK(tls_var == 5, "TLS initialised");
     tls_var++;
     CHECK(tls_var == 6, "TLS writable");
-    CHECK(getenv("PATH") && strcmp(getenv("PATH"), "/bin") == 0, "environment passed");
+    CHECK(getenv("PATH") && strstr(getenv("PATH"), "/bin"), "environment passed");
 
     printf("[test] heap\n");
     /* heap: small and large (brk and mmap paths) */
@@ -274,16 +308,8 @@ int main(int argc, char **argv)
     if (!in_vm)
         printf("[test] not in a VM: skipping the disk-formatting tests\n");
 
-    /* zaefs on the NVMe disk: format if needed, mount, exercise, count boots */
-    if (in_vm && stat("/dev/nvme0n1", &st) == 0) {
-        umount("/disk");
-        if (mount("/dev/nvme0n1", "/disk", "zaefs", 0, NULL) != 0 && errno != EBUSY) {
-            pid = fork();
-            if (pid == 0) { execl("/bin/mkfs.zaefs", "mkfs.zaefs", "-L", "sicdisk", "/dev/nvme0n1", (char *)NULL); _exit(127); }
-            waitpid(pid, &status, 0);
-            CHECK(WEXITSTATUS(status) == 0, "mkfs.zaefs");
-            CHECK(mount("/dev/nvme0n1", "/disk", "zaefs", 0, NULL) == 0, "mount freshly formatted zaefs");
-        }
+    /* zaefs on the NVMe disk: mount (or format a blank one), exercise, count boots */
+    if (in_vm && stat("/dev/nvme0n1", &st) == 0 && (umount("/disk"), 1) && disk_ready("/dev/nvme0n1", "/disk", "zaefs")) {
         int boots = 0;
         f = fopen("/disk/boot_count", "r");
         if (f) { fscanf(f, "%d", &boots); fclose(f); }
@@ -348,15 +374,7 @@ int main(int argc, char **argv)
     }
 
     /* FAT on the second NVMe disk: format, mount, write, long names readable, unmount, remount */
-    if (in_vm && stat("/dev/nvme1n1", &st) == 0) {
-        mkdir("/fat", 0755);
-        if (mount("/dev/nvme1n1", "/fat", "fat", 0, NULL) != 0 && errno != EBUSY) {
-            pid = fork();
-            if (pid == 0) { execl("/bin/mkfs.fat", "mkfs.fat", "-n", "SICFAT", "/dev/nvme1n1", (char *)NULL); _exit(127); }
-            waitpid(pid, &status, 0);
-            CHECK(WEXITSTATUS(status) == 0, "mkfs.fat");
-            CHECK(mount("/dev/nvme1n1", "/fat", "fat", 0, NULL) == 0, "mount freshly formatted FAT");
-        }
+    if (in_vm && stat("/dev/nvme1n1", &st) == 0 && (mkdir("/fat", 0755), 1) && disk_ready("/dev/nvme1n1", "/fat", "fat")) {
         mkdir("/fat/dir", 0755);
         f = fopen("/fat/dir/hello.txt", "w");
         CHECK(f != NULL, "create on FAT");
